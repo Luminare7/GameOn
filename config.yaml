@@ -1,0 +1,32 @@
+# GameOn Configuration File
+
+# Recording Settings
+recording:
+  fps: 60
+  video_codec: 'h264'  # 'h264', 'h265', 'mp4v', 'mjpeg', 'raw'
+  video_quality: 20    # CRF for H.264/H.265: 0 (best) to 51 (worst), 18-23 recommended
+  latency_offset_ms: 0  # Adjust if inputs lag behind video
+
+# Storage
+storage:
+  base_path: './data'
+  sessions_folder: 'sessions'
+  database_name: 'gameon.db'
+
+# Audio Settings
+audio:
+  sample_rate: 44100
+  channels: 2
+  system_audio: true
+  microphone_audio: true
+
+# Input Settings
+input:
+  device: 'keyboard'  # 'keyboard', 'xbox', 'playstation'
+  capture_mouse: true
+
+# Display Settings
+display:
+  show_recording_indicator: true
+  monitor: 0  # Monitor index to capture (0 = primary)
+
