@@ -5,9 +5,9 @@ numpy>=1.24.0                 # Array operations
 
 # Audio capture
 sounddevice>=0.4.6            # Audio capture (microphone)
-soundfile>=0.12.1             # Audio file I/O
+SoundFile>=0.12.1             # Audio file I/O (note: import as 'soundfile')
 pyaudiowpatch>=0.2.12.8; sys_platform == 'win32'  # Windows system audio capture
-pyaudio>=0.2.13; sys_platform != 'win32'  # macOS/Linux audio capture
+# pyaudio>=0.2.13; sys_platform != 'win32'  # macOS/Linux - requires: brew install portaudio
 
 # Input capture
 pynput>=1.7.6                 # Keyboard and mouse capture
