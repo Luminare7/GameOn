@@ -28,7 +28,9 @@ class SessionManager:
         capture_microphone: bool = True,
         capture_mouse: bool = True,
         monitor_index: int = 0,
-        use_dxcam: bool = True
+        use_dxcam: bool = True,
+        codec: str = 'h264',
+        quality: int = 20
     ):
         """
         Initialize session manager.
@@ -46,6 +48,8 @@ class SessionManager:
             capture_mouse: Enable mouse capture (keyboard mode only)
             monitor_index: Monitor to capture
             use_dxcam: Use DXCam on Windows if available
+            codec: Video codec ('h264', 'h265', 'mp4v', 'mjpeg', 'raw')
+            quality: Video quality (CRF for H.264/H.265, 0-51)
         """
         self.db_manager = DatabaseManager(db_path)
         self.sessions_base_path = sessions_base_path
@@ -59,6 +63,8 @@ class SessionManager:
         self.capture_mouse = capture_mouse
         self.monitor_index = monitor_index
         self.use_dxcam = use_dxcam
+        self.codec = codec
+        self.quality = quality
         
         # Session state
         self.current_session: Optional[Session] = None
@@ -145,6 +151,8 @@ class SessionManager:
             fps=self.fps,
             monitor_index=self.monitor_index,
             output_path=video_path,
+            codec=self.codec,
+            quality=self.quality,
             use_dxcam=self.use_dxcam
         )
         

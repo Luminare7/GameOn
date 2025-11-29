@@ -73,9 +73,10 @@ class VideoCapture:
             except Exception as e:
                 print(f"⚠ DXCam initialization failed: {e}, falling back to MSS")
         
-        # Fallback to MSS
-        self.camera = mss.mss()
+        # Set backend to MSS but don't create camera yet
+        # MSS object must be created in the same thread that uses it (Windows threading issue)
         self.backend = 'mss'
+        self.camera = None  # Will be created in capture thread
         print(f"✓ Using MSS backend (cross-platform) on monitor {self.monitor_index}")
     
     def get_monitor_info(self) -> dict:
@@ -89,16 +90,18 @@ class VideoCapture:
                     'index': self.monitor_index
                 }
         else:  # MSS
-            monitors = self.camera.monitors
-            if self.monitor_index < len(monitors):
-                mon = monitors[self.monitor_index + 1]
-                return {
-                    'width': mon['width'],
-                    'height': mon['height'],
-                    'left': mon['left'],
-                    'top': mon['top'],
-                    'index': self.monitor_index
-                }
+            # Create temporary MSS object in this thread to get monitor info
+            with mss.mss() as temp_mss:
+                monitors = temp_mss.monitors
+                if self.monitor_index < len(monitors):
+                    mon = monitors[self.monitor_index + 1]
+                    return {
+                        'width': mon['width'],
+                        'height': mon['height'],
+                        'left': mon['left'],
+                        'top': mon['top'],
+                        'index': self.monitor_index
+                    }
         
         return {}
     
@@ -159,13 +162,13 @@ class VideoCapture:
         
         print(f"✓ FFmpeg encoder started: {self.codec.upper()} CRF {self.quality}")
     
-    def _capture_frame_mss(self) -> Optional[np.ndarray]:
+    def _capture_frame_mss(self, mss_instance) -> Optional[np.ndarray]:
         """Capture a frame using MSS."""
         try:
-            monitors = self.camera.monitors
+            monitors = mss_instance.monitors
             mon = monitors[self.monitor_index + 1]
             
-            screenshot = self.camera.grab(mon)
+            screenshot = mss_instance.grab(mon)
             frame = np.array(screenshot)
             
             # Convert BGRA to BGR
@@ -199,27 +202,40 @@ class VideoCapture:
         
         print(f"📹 Video capture started at {self.fps} FPS")
         
-        while self.is_recording:
-            current_time = time.time()
-            elapsed = current_time - last_capture
-            
-            if elapsed >= frame_time:
-                # Capture frame
-                if self.backend == 'dxcam':
-                    frame = self._capture_frame_dxcam()
+        # Create MSS object in THIS thread if using MSS backend
+        # This fixes Windows threading issue with thread-local storage
+        mss_instance = None
+        if self.backend == 'mss':
+            mss_instance = mss.mss()
+            print("✓ MSS instance created in capture thread")
+        
+        try:
+            while self.is_recording:
+                current_time = time.time()
+                elapsed = current_time - last_capture
+                
+                if elapsed >= frame_time:
+                    # Capture frame
+                    if self.backend == 'dxcam':
+                        frame = self._capture_frame_dxcam()
+                    else:
+                        frame = self._capture_frame_mss(mss_instance)
+                    
+                    if frame is not None:
+                        try:
+                            self.frame_queue.put((frame, current_time), timeout=0.01)
+                            frame_count += 1
+                        except queue.Full:
+                            print("⚠ Frame buffer full, dropping frame")
+                    
+                    last_capture = current_time
                 else:
-                    frame = self._capture_frame_mss()
-                
-                if frame is not None:
-                    try:
-                        self.frame_queue.put((frame, current_time), timeout=0.01)
-                        frame_count += 1
-                    except queue.Full:
-                        print("⚠ Frame buffer full, dropping frame")
-                
-                last_capture = current_time
-            else:
-                time.sleep(max(0.001, frame_time - elapsed))
+                    time.sleep(max(0.001, frame_time - elapsed))
+        finally:
+            # Clean up MSS instance
+            if mss_instance:
+                mss_instance.close()
+                print("✓ MSS instance closed")
         
         print(f"📹 Video capture stopped. Captured {frame_count} frames")
     
@@ -351,5 +367,8 @@ class VideoCapture:
         """Context manager exit."""
         self.stop_recording()
         
-        if self.backend == 'mss' and self.camera:
-            self.camera.close()
+        # Note: MSS instance is now created and closed in capture thread
+        # DXCam camera cleanup
+        if self.backend == 'dxcam' and self.camera:
+            # DXCam handles cleanup automatically
+            pass
