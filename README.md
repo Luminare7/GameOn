@@ -8,7 +8,7 @@ GameOn allows gamers to spontaneously populate a database with:
 - 🎤 **Microphone Audio** (voice chat)
 - ⌨️ **Input Events** (keyboard, mouse, Xbox/PlayStation controllers)
 
-All synchronized and stored in an SQLite database for easy access and training AI models like NIMA2.
+All synchronized and stored in an SQLite database for easy access to incentivize training AI models like [SIMA2](https://deepmind.google/blog/sima-2-an-agent-that-plays-reasons-and-learns-with-you-in-virtual-3d-worlds/).
 
 ---
 
