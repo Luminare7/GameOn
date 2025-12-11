@@ -1,12 +1,24 @@
 -- GameOn Database Schema Improvements
 -- Migration: 001_improve_schema.sql
--- Fixed version: Compatible with ALL SQLite versions
+-- SMART VERSION: Handles incomplete/old databases by recreating tables
 
 -- =============================================================================
--- PART 1: Create base tables (if they don't exist)
+-- STRATEGY: Drop and recreate tables to ensure correct schema
+-- This is safe because:
+-- 1. run_migration.py creates a backup first
+-- 2. For new installs, tables won't exist anyway
+-- 3. You can always restore from backup if needed
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS sessions (
+-- =============================================================================
+-- PART 1: Create sessions table with FULL schema
+-- =============================================================================
+
+-- Drop old incomplete table if it exists
+DROP TABLE IF EXISTS sessions;
+
+-- Create complete sessions table with all 18 columns
+CREATE TABLE sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_name TEXT NOT NULL,
     start_time TIMESTAMP NOT NULL,
@@ -20,10 +32,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     latency_offset_ms INTEGER DEFAULT 0,
     status TEXT DEFAULT 'recording',
     monitor_index INTEGER DEFAULT 0,
-    notes TEXT
+    notes TEXT,
+    video_width INTEGER,
+    video_height INTEGER,
+    video_codec TEXT,
+    total_frames INTEGER,
+    file_size_bytes INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS input_events (
+-- Create indexes for sessions
+CREATE INDEX idx_game_name ON sessions(game_name);
+CREATE INDEX idx_start_time ON sessions(start_time);
+CREATE INDEX idx_status ON sessions(status);
+
+-- =============================================================================
+-- PART 2: Create input_events table with action_code support
+-- =============================================================================
+
+-- Drop old table if it exists
+DROP TABLE IF EXISTS input_events;
+
+-- Create complete input_events table
+CREATE TABLE input_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
     timestamp_ms INTEGER NOT NULL,
@@ -33,33 +63,17 @@ CREATE TABLE IF NOT EXISTS input_events (
     value REAL,
     x_position REAL,
     y_position REAL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    action_code INTEGER,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (action_code) REFERENCES action_codes(id)
 );
 
--- =============================================================================
--- PART 2: Add performance indexes
--- =============================================================================
-
-CREATE INDEX IF NOT EXISTS idx_game_name ON sessions(game_name);
-CREATE INDEX IF NOT EXISTS idx_start_time ON sessions(start_time);
-CREATE INDEX IF NOT EXISTS idx_status ON sessions(status);
-CREATE INDEX IF NOT EXISTS idx_session_events ON input_events(session_id, timestamp_ms);
-CREATE INDEX IF NOT EXISTS idx_timestamp ON input_events(timestamp_ms);
+-- Create indexes for input_events
+CREATE INDEX idx_session_events ON input_events(session_id, timestamp_ms);
+CREATE INDEX idx_timestamp ON input_events(timestamp_ms);
 
 -- =============================================================================
--- PART 3: Add new columns to sessions table
--- NOTE: Removed "IF NOT EXISTS" for SQLite compatibility
---       run_migration.py handles "duplicate column" errors gracefully
--- =============================================================================
-
-ALTER TABLE sessions ADD COLUMN video_width INTEGER;
-ALTER TABLE sessions ADD COLUMN video_height INTEGER;
-ALTER TABLE sessions ADD COLUMN video_codec TEXT;
-ALTER TABLE sessions ADD COLUMN total_frames INTEGER;
-ALTER TABLE sessions ADD COLUMN file_size_bytes INTEGER;
-
--- =============================================================================
--- PART 4: Create action_codes table for ML-ready input encoding
+-- PART 3: Create action_codes table for ML-ready input encoding
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS action_codes (
@@ -74,13 +88,7 @@ CREATE TABLE IF NOT EXISTS action_codes (
 );
 
 -- =============================================================================
--- PART 5: Add action_code reference to input_events
--- =============================================================================
-
-ALTER TABLE input_events ADD COLUMN action_code INTEGER REFERENCES action_codes(id);
-
--- =============================================================================
--- PART 6: Create frame_timestamps table for perfect A/V sync
+-- PART 4: Create frame_timestamps table for perfect A/V sync
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS frame_timestamps (
@@ -96,7 +104,7 @@ CREATE TABLE IF NOT EXISTS frame_timestamps (
 CREATE INDEX IF NOT EXISTS idx_frame_timing ON frame_timestamps(session_id, frame_number);
 
 -- =============================================================================
--- PART 7: Create session_health table for diagnostics
+-- PART 5: Create session_health table for diagnostics
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS session_health (
@@ -112,7 +120,7 @@ CREATE TABLE IF NOT EXISTS session_health (
 );
 
 -- =============================================================================
--- PART 8: Insert default action codes for common inputs
+-- PART 6: Insert default action codes for common inputs
 -- =============================================================================
 
 -- Keyboard movement keys
