@@ -2,7 +2,7 @@
 """
 GameOn Executable Builder
 
-Automatically creates standalone executables for Windows, macOS, and Linux.
+Automatically creates standalone executables for Windows and macOS.
 Users can download and run without installing Python or dependencies.
 
 Usage:
@@ -33,8 +33,7 @@ DATA_FILES = [
 ]
 
 # Hidden imports that PyInstaller might miss
-# Note: Platform-specific imports are added dynamically in create_spec_file()
-# Note: pkg_resources.py2_warn removed - causes "not found" errors on some systems
+# Platform-specific imports are added dynamically in create_spec_file()
 HIDDEN_IMPORTS = [
     'sounddevice',
     'soundfile',
@@ -52,6 +51,7 @@ EXCLUDES = [
     'sphinx',
     'docutils',
     'PIL._tkinter_finder',
+    'pkg_resources.py2_warn',
 ]
 
 # ============================================================================
@@ -148,14 +148,10 @@ def create_spec_file(onefile=False, ffmpeg_path=None):
             ffmpeg_exe = os.path.join(ffmpeg_path, 'macos', 'ffmpeg')
             if os.path.exists(ffmpeg_exe):
                 datas_str += "        ('{}', '.'),\n".format(ffmpeg_exe)
-        else:
-            ffmpeg_exe = os.path.join(ffmpeg_path, 'linux', 'ffmpeg')
-            if os.path.exists(ffmpeg_exe):
-                datas_str += "        ('{}', '.'),\n".format(ffmpeg_exe)
     
     datas_str += "    ]"
     
-    # Build hidden imports list based on platform
+    # Build hidden imports list - PLATFORM SPECIFIC ONLY
     hiddenimports_str = "[\n"
     for imp in HIDDEN_IMPORTS:
         hiddenimports_str += "        '{}',\n".format(imp)
@@ -170,9 +166,6 @@ def create_spec_file(onefile=False, ffmpeg_path=None):
     elif plat == 'macos':
         hiddenimports_str += "        'pynput.keyboard._darwin',\n"
         hiddenimports_str += "        'pynput.mouse._darwin',\n"
-    else:  # linux
-        hiddenimports_str += "        'pynput.keyboard._xorg',\n"
-        hiddenimports_str += "        'pynput.mouse._xorg',\n"
     
     hiddenimports_str += "    ]"
     
