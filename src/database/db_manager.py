@@ -21,6 +21,7 @@ class DatabaseManager:
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
+        self._action_code_cache = {}  # Cache for action codes
         self._ensure_database_exists()
     
     def _ensure_database_exists(self):
@@ -317,4 +318,114 @@ class DatabaseManager:
                 'total_input_events': total_events,
                 'unique_games': unique_games
             }
+    
+    def get_or_create_action_code(
+        self, 
+        input_device: str, 
+        raw_input: str,
+        description: Optional[str] = None,
+        category: Optional[str] = None
+    ) -> int:
+        """Get existing action code or create new one. Returns action code ID."""
+        cache_key = f"{input_device}:{raw_input}"
+        
+        if cache_key in self._action_code_cache:
+            return self._action_code_cache[cache_key]
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "SELECT id FROM action_codes WHERE input_device = ? AND raw_input = ?",
+                (input_device, raw_input)
+            )
+            row = cursor.fetchone()
+            
+            if row:
+                action_code_id = row[0]
+            else:
+                cursor.execute(
+                    "SELECT MAX(encoded_value) FROM action_codes WHERE input_device = ?",
+                    (input_device,)
+                )
+                max_val = cursor.fetchone()[0]
+                encoded_value = (max_val + 1) if max_val is not None else 0
+                
+                cursor.execute(
+                    """INSERT INTO action_codes (input_device, raw_input, encoded_value, description, category)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (input_device, raw_input, encoded_value, description, category)
+                )
+                conn.commit()
+                action_code_id = cursor.lastrowid
+            
+            self._action_code_cache[cache_key] = action_code_id
+            return action_code_id
+    
+    def get_action_mapping(self, input_device: Optional[str] = None) -> dict:
+        """Get action code mapping for ML training."""
+        query = "SELECT input_device, raw_input, encoded_value FROM action_codes"
+        params = []
+        
+        if input_device:
+            query += " WHERE input_device = ?"
+            params.append(input_device)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            
+            mapping = {}
+            for device, raw, encoded in cursor.fetchall():
+                key = f"{device}:{raw}"
+                mapping[key] = encoded
+            
+            return mapping
+    
+    def get_incomplete_sessions(self) -> List[Session]:
+        """Get sessions that didn't complete properly."""
+        query = "SELECT * FROM sessions WHERE status = 'recording' OR end_time IS NULL"
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            return [Session.from_db_row(row) for row in rows]
+    
+    def mark_session_failed(self, session_id: int, error: str):
+        """Mark a session as failed."""
+        query = "UPDATE sessions SET status = 'failed', notes = ? WHERE id = ?"
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (error, session_id))
+            conn.commit()
+    
+    def get_input_events_batch(self, session_id: int, start_frame: int, end_frame: int, fps: int) -> List[InputEvent]:
+        """Get input events for a specific frame range."""
+        from .models import InputEvent
+        
+        start_ms = int((start_frame / fps) * 1000)
+        end_ms = int((end_frame / fps) * 1000)
+        
+        query = """
+            SELECT * FROM input_events 
+            WHERE session_id = ? AND timestamp_ms BETWEEN ? AND ?
+            ORDER BY timestamp_ms
+        """
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (session_id, start_ms, end_ms))
+            rows = cursor.fetchall()
+            
+            return [
+                InputEvent(
+                    event_id=row[0], session_id=row[1], timestamp_ms=row[2],
+                    input_device=row[3], button_key=row[4], action=row[5],
+                    value=row[6], x_position=row[7], y_position=row[8],
+                    action_code=row[9] if len(row) > 9 else None
+                )
+                for row in rows
+            ]
 
