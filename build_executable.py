@@ -23,7 +23,7 @@ from pathlib import Path
 # Configuration
 # ============================================================================
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 APP_NAME = "GameOn"
 DESCRIPTION = "Gameplay Recorder for AI Training"
 
@@ -33,20 +33,14 @@ DATA_FILES = [
 ]
 
 # Hidden imports that PyInstaller might miss
+# Note: Platform-specific imports are added dynamically in create_spec_file()
+# Note: pkg_resources.py2_warn removed - causes "not found" errors on some systems
 HIDDEN_IMPORTS = [
-    'pynput.keyboard._win32',
-    'pynput.keyboard._darwin',
-    'pynput.keyboard._xorg',
-    'pynput.mouse._win32',
-    'pynput.mouse._darwin',
-    'pynput.mouse._xorg',
     'sounddevice',
     'soundfile',
-    'PIL._tkinter_finder',
-    'pkg_resources.py2_warn',
 ]
 
-# Modules to exclude (reduce size)
+# Modules to exclude (reduce size and avoid missing module errors)
 EXCLUDES = [
     'matplotlib',
     'scipy',
@@ -57,6 +51,7 @@ EXCLUDES = [
     'pytest',
     'sphinx',
     'docutils',
+    'PIL._tkinter_finder',
 ]
 
 # ============================================================================
@@ -74,10 +69,7 @@ def get_platform():
 def check_pyinstaller():
     """Check if PyInstaller is installed."""
     try:
-        # Use a dynamic import so static analyzers (e.g., Pylance) don't flag
-        # the optional build dependency as "could not be resolved from source".
         import importlib
-
         pyinstaller = importlib.import_module("PyInstaller")
         version = getattr(pyinstaller, "__version__", "unknown")
         print("[OK] PyInstaller {} found".format(version))
@@ -163,17 +155,28 @@ def create_spec_file(onefile=False, ffmpeg_path=None):
     
     datas_str += "    ]"
     
+    # Build hidden imports list based on platform
     hiddenimports_str = "[\n"
     for imp in HIDDEN_IMPORTS:
         hiddenimports_str += "        '{}',\n".format(imp)
     
+    # Add platform-specific pynput backends (ONLY for current platform)
     if plat == 'windows':
+        hiddenimports_str += "        'pynput.keyboard._win32',\n"
+        hiddenimports_str += "        'pynput.mouse._win32',\n"
         hiddenimports_str += "        'pyaudiowpatch',\n"
         hiddenimports_str += "        'dxcam',\n"
         hiddenimports_str += "        'inputs',\n"
+    elif plat == 'macos':
+        hiddenimports_str += "        'pynput.keyboard._darwin',\n"
+        hiddenimports_str += "        'pynput.mouse._darwin',\n"
+    else:  # linux
+        hiddenimports_str += "        'pynput.keyboard._xorg',\n"
+        hiddenimports_str += "        'pynput.mouse._xorg',\n"
     
     hiddenimports_str += "    ]"
     
+    # Build excludes list
     excludes_str = "[\n"
     for exc in EXCLUDES:
         excludes_str += "        '{}',\n".format(exc)
