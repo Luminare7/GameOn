@@ -74,11 +74,16 @@ def get_platform():
 def check_pyinstaller():
     """Check if PyInstaller is installed."""
     try:
-        import PyInstaller
-        print(f"✓ PyInstaller {PyInstaller.__version__} found")
+        # Use a dynamic import so static analyzers (e.g., Pylance) don't flag
+        # the optional build dependency as "could not be resolved from source".
+        import importlib
+
+        pyinstaller = importlib.import_module("PyInstaller")
+        version = getattr(pyinstaller, "__version__", "unknown")
+        print("[OK] PyInstaller {} found".format(version))
         return True
     except ImportError:
-        print("✗ PyInstaller not found")
+        print("[ERROR] PyInstaller not found")
         print("  Install with: pip install pyinstaller")
         return False
 
@@ -89,18 +94,18 @@ def check_ffmpeg():
     
     for dir_path in ffmpeg_dirs:
         if os.path.exists(dir_path):
-            print(f"✓ FFmpeg found in {dir_path}")
+            print("[OK] FFmpeg found in {}".format(dir_path))
             return dir_path
     
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True)
         if result.returncode == 0:
-            print("✓ System FFmpeg available (not bundled)")
+            print("[OK] System FFmpeg available (not bundled)")
             return None
     except FileNotFoundError:
         pass
     
-    print("⚠ FFmpeg not found - H.264/H.265 will use fallback codec")
+    print("[WARN] FFmpeg not found - H.264/H.265 will use fallback codec")
     return None
 
 
@@ -110,16 +115,16 @@ def clean_build():
     
     for dir_name in dirs_to_clean:
         if os.path.exists(dir_name):
-            print(f"  Removing {dir_name}/")
+            print("  Removing {}/".format(dir_name))
             shutil.rmtree(dir_name)
     
     import glob
     for file_path in glob.glob('*.spec'):
         if 'GameOn.spec' not in file_path:
-            print(f"  Removing {file_path}")
+            print("  Removing {}".format(file_path))
             os.remove(file_path)
     
-    print("✓ Clean complete")
+    print("[OK] Clean complete")
 
 
 def create_spec_file(onefile=False, ffmpeg_path=None):
@@ -140,27 +145,27 @@ def create_spec_file(onefile=False, ffmpeg_path=None):
     datas_str = "[\n"
     for src, dst in DATA_FILES:
         if os.path.exists(src):
-            datas_str += f"        ('{src}', '{dst}'),\n"
+            datas_str += "        ('{}', '{}'),\n".format(src, dst)
     
     if ffmpeg_path:
         if plat == 'windows':
             ffmpeg_exe = os.path.join(ffmpeg_path, 'windows', 'ffmpeg.exe')
             if os.path.exists(ffmpeg_exe):
-                datas_str += f"        ('{ffmpeg_exe}', '.'),\n"
+                datas_str += "        ('{}', '.'),\n".format(ffmpeg_exe)
         elif plat == 'macos':
             ffmpeg_exe = os.path.join(ffmpeg_path, 'macos', 'ffmpeg')
             if os.path.exists(ffmpeg_exe):
-                datas_str += f"        ('{ffmpeg_exe}', '.'),\n"
+                datas_str += "        ('{}', '.'),\n".format(ffmpeg_exe)
         else:
             ffmpeg_exe = os.path.join(ffmpeg_path, 'linux', 'ffmpeg')
             if os.path.exists(ffmpeg_exe):
-                datas_str += f"        ('{ffmpeg_exe}', '.'),\n"
+                datas_str += "        ('{}', '.'),\n".format(ffmpeg_exe)
     
     datas_str += "    ]"
     
     hiddenimports_str = "[\n"
     for imp in HIDDEN_IMPORTS:
-        hiddenimports_str += f"        '{imp}',\n"
+        hiddenimports_str += "        '{}',\n".format(imp)
     
     if plat == 'windows':
         hiddenimports_str += "        'pyaudiowpatch',\n"
@@ -171,12 +176,12 @@ def create_spec_file(onefile=False, ffmpeg_path=None):
     
     excludes_str = "[\n"
     for exc in EXCLUDES:
-        excludes_str += f"        '{exc}',\n"
+        excludes_str += "        '{}',\n".format(exc)
     excludes_str += "    ]"
     
-    icon_str = f"'{icon}'" if icon else 'None'
+    icon_str = "'{}'".format(icon) if icon else 'None'
     
-    spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
+    spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 import sys
 import os
 
@@ -187,12 +192,12 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas={datas_str},
-    hiddenimports={hiddenimports_str},
+    datas={datas},
+    hiddenimports={hiddenimports},
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes={excludes_str},
+    excludes={excludes},
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -201,17 +206,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-'''
+'''.format(datas=datas_str, hiddenimports=hiddenimports_str, excludes=excludes_str)
     
     if onefile:
-        spec_content += f'''exe = EXE(
+        spec_content += '''exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.zipfiles,
     a.datas,
     [],
-    name='{APP_NAME}',
+    name='{name}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -224,16 +229,16 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon={icon_str},
+    icon={icon},
 )
-'''
+'''.format(name=APP_NAME, console=console, icon=icon_str)
     else:
-        spec_content += f'''exe = EXE(
+        spec_content += '''exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name='{APP_NAME}',
+    name='{name}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -244,7 +249,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon={icon_str},
+    icon={icon},
 )
 
 coll = COLLECT(
@@ -255,28 +260,28 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='{APP_NAME}',
+    name='{name}',
 )
-'''
+'''.format(name=APP_NAME, console=console, icon=icon_str)
     
     if plat == 'macos' and not onefile:
-        spec_content += f'''
+        spec_content += '''
 app = BUNDLE(
     coll,
-    name='{APP_NAME}.app',
-    icon={icon_str},
+    name='{name}.app',
+    icon={icon},
     bundle_identifier='com.gameon.recorder',
     info_plist={{
-        'CFBundleName': '{APP_NAME}',
-        'CFBundleDisplayName': '{APP_NAME}',
-        'CFBundleVersion': '{VERSION}',
-        'CFBundleShortVersionString': '{VERSION}',
+        'CFBundleName': '{name}',
+        'CFBundleDisplayName': '{name}',
+        'CFBundleVersion': '{version}',
+        'CFBundleShortVersionString': '{version}',
         'NSHighResolutionCapable': True,
         'NSMicrophoneUsageDescription': 'GameOn needs microphone access to record voice chat.',
         'NSScreenCaptureDescription': 'GameOn needs screen recording access to capture gameplay.',
     }},
 )
-'''
+'''.format(name=APP_NAME, version=VERSION, icon=icon_str)
     
     return spec_content
 
@@ -284,47 +289,57 @@ app = BUNDLE(
 def build_executable(onefile=False, clean=False):
     """Build the executable."""
     
-    print("\n" + "="*60)
-    print(f"🎮 Building {APP_NAME} v{VERSION}")
-    print("="*60 + "\n")
+    print("")
+    print("=" * 60)
+    print("Building {} v{}".format(APP_NAME, VERSION))
+    print("=" * 60)
+    print("")
     
     if not check_pyinstaller():
         return False
     
     if clean:
-        print("\n📁 Cleaning previous builds...")
+        print("")
+        print("[INFO] Cleaning previous builds...")
         clean_build()
     
-    print("\n🔍 Checking FFmpeg...")
+    print("")
+    print("[INFO] Checking FFmpeg...")
     ffmpeg_path = check_ffmpeg()
     
-    print("\n📝 Creating spec file...")
+    print("")
+    print("[INFO] Creating spec file...")
     spec_content = create_spec_file(onefile=onefile, ffmpeg_path=ffmpeg_path)
     
     spec_path = 'GameOn.spec'
     with open(spec_path, 'w') as f:
         f.write(spec_content)
-    print(f"✓ Created {spec_path}")
+    print("[OK] Created {}".format(spec_path))
     
-    print("\n🔨 Building executable...")
-    print("   This may take a few minutes...\n")
+    print("")
+    print("[INFO] Building executable...")
+    print("   This may take a few minutes...")
+    print("")
     
     cmd = ['pyinstaller', '--clean', '--noconfirm', spec_path]
     
     try:
         subprocess.run(cmd, check=True)
-        print("\n✓ Build completed successfully!")
+        print("")
+        print("[OK] Build completed successfully!")
     except subprocess.CalledProcessError as e:
-        print(f"\n✗ Build failed with error code {e.returncode}")
+        print("")
+        print("[ERROR] Build failed with error code {}".format(e.returncode))
         return False
     
-    print("\n📦 Post-build tasks...")
+    print("")
+    print("[INFO] Post-build tasks...")
     
     plat = get_platform()
     if onefile:
-        exe_path = f'dist/{APP_NAME}.exe' if plat == 'windows' else f'dist/{APP_NAME}'
+        exe_path = 'dist/{}.exe'.format(APP_NAME) if plat == 'windows' else 'dist/{}'.format(APP_NAME)
     else:
-        exe_path = f'dist/{APP_NAME}.app' if plat == 'macos' else f'dist/{APP_NAME}'
+        exe_path = 'dist/{}.app'.format(APP_NAME) if plat == 'macos' else 'dist/{}'.format(APP_NAME)
     
     if os.path.exists(exe_path):
         if os.path.isfile(exe_path):
@@ -336,15 +351,19 @@ def build_executable(onefile=False, clean=False):
                 for filename in filenames
             ) / (1024 * 1024)
         
-        print(f"\n" + "="*60)
-        print("✅ BUILD SUCCESSFUL!")
-        print("="*60)
-        print(f"\n📁 Output: {exe_path}")
-        print(f"📊 Size: {size:.1f} MB\n")
+        print("")
+        print("=" * 60)
+        print("BUILD SUCCESSFUL!")
+        print("=" * 60)
+        print("")
+        print("Output: {}".format(exe_path))
+        print("Size: {:.1f} MB".format(size))
+        print("")
         
         return True
     else:
-        print(f"\n✗ Expected output not found: {exe_path}")
+        print("")
+        print("[ERROR] Expected output not found: {}".format(exe_path))
         return False
 
 
@@ -352,7 +371,7 @@ def create_assets_directory():
     """Create assets directory with placeholder files."""
     if not os.path.exists('assets'):
         os.makedirs('assets')
-        print(f"✓ Created assets/ directory")
+        print("[OK] Created assets/ directory")
 
 
 def main():
@@ -364,7 +383,7 @@ def main():
     args = parser.parse_args()
     
     if not os.path.exists('main.py'):
-        print("✗ Error: main.py not found")
+        print("[ERROR] main.py not found")
         print("  Run this script from the GameOn project root directory")
         sys.exit(1)
     
@@ -375,7 +394,7 @@ def main():
         spec_content = create_spec_file(onefile=args.onefile, ffmpeg_path=ffmpeg_path)
         with open('GameOn.spec', 'w') as f:
             f.write(spec_content)
-        print("✓ Created GameOn.spec")
+        print("[OK] Created GameOn.spec")
     else:
         success = build_executable(onefile=args.onefile, clean=args.clean)
         sys.exit(0 if success else 1)
