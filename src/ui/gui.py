@@ -576,9 +576,12 @@ class GameOnGUI:
             
             stats_text = f"📊 GameOn Database Statistics\n\n"
             stats_text += f"Total Sessions: {stats['total_sessions']}\n"
+            stats_text += f"Completed Sessions: {stats['completed_sessions']}\n"
             stats_text += f"Unique Games: {stats['unique_games']}\n"
             stats_text += f"Total Duration: {stats['total_duration_seconds'] / 3600:.2f} hours\n"
-            stats_text += f"Total Input Events: {stats['total_input_events']:,}\n\n"
+            stats_text += f"Total Frames: {stats['total_frames']:,}\n"
+            stats_text += f"Total Input Events: {stats['total_input_events']:,}\n"
+            stats_text += f"Total Storage: {stats['total_storage_gb']:.2f} GB\n\n"
             stats_text += f"Database: {self.db_path}"
             
             messagebox.showinfo("Database Statistics", stats_text)
@@ -609,7 +612,7 @@ class GameOnGUI:
         self.log("🎬 Starting recording session...")
         self.log("="*60)
         
-        # Create session manager
+        # Create session manager with ALL parameters passed in constructor
         try:
             self.session_manager = SessionManager(
                 db_path=self.db_path,
@@ -623,12 +626,10 @@ class GameOnGUI:
                 capture_microphone=self.capture_microphone.get(),
                 capture_mouse=self.capture_mouse.get(),
                 monitor_index=self.monitor_var.get(),
-                use_dxcam=self.use_dxcam.get()
+                use_dxcam=self.use_dxcam.get(),
+                codec=self.codec_var.get(),
+                quality=self.quality_var.get()
             )
-            
-            # Update session manager to support codec and quality
-            self.session_manager.codec = self.codec_var.get()
-            self.session_manager.quality = self.quality_var.get()
             
             # Start in separate thread
             def start_thread():

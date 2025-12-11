@@ -1,0 +1,49 @@
+# GameOn - Machine Learning Export Dependencies
+# Install with: pip install -r requirements-ml.txt
+#
+# These are OPTIONAL - only needed if you want to export
+# recordings to PyTorch, TensorFlow, or HDF5 formats.
+
+# =============================================================================
+# PyTorch Export
+# =============================================================================
+torch>=2.0.0
+torchvision>=0.15.0
+
+# =============================================================================
+# TensorFlow Export
+# =============================================================================
+tensorflow>=2.13.0
+
+# =============================================================================
+# HDF5 Export (Universal - works with PyTorch, TensorFlow, NumPy)
+# =============================================================================
+h5py>=3.9.0
+
+# =============================================================================
+# You don't need ALL of these! Install only what you need:
+# =============================================================================
+#
+# For PyTorch only:
+#   pip install torch torchvision
+#
+# For TensorFlow only:
+#   pip install tensorflow
+#
+# For HDF5 only (recommended for sharing datasets):
+#   pip install h5py
+#
+# For everything:
+#   pip install -r requirements-ml.txt
+#
+# =============================================================================
+# GPU Support (Optional)
+# =============================================================================
+#
+# PyTorch with CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# TensorFlow with GPU:
+#   pip install tensorflow[and-cuda]
+#
+# =============================================================================

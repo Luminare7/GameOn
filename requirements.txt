@@ -1,3 +1,6 @@
+# GameOn - Core Dependencies
+# Install with: pip install -r requirements.txt
+
 # Core dependencies
 mss>=9.0.1                    # Cross-platform screen capture
 opencv-python>=4.8.0          # Video processing and encoding
@@ -6,37 +9,47 @@ numpy>=1.24.0                 # Array operations
 # Audio capture
 sounddevice>=0.4.6            # Audio capture (microphone)
 SoundFile>=0.12.1             # Audio file I/O (note: import as 'soundfile')
-pyaudiowpatch>=0.2.12.8; sys_platform == 'win32'  # Windows system audio capture
-# pyaudio>=0.2.13; sys_platform != 'win32'  # macOS/Linux - requires: brew install portaudio
+
+# Windows system audio capture (auto-skipped on macOS/Linux)
+pyaudiowpatch>=0.2.12.8; sys_platform == 'win32'
 
 # Input capture
 pynput>=1.7.6                 # Keyboard and mouse capture
 inputs>=0.5; sys_platform == 'win32'  # Gamepad support (Windows)
 pygame>=2.5.0                 # Alternative gamepad support (cross-platform)
 
-# Database
-sqlalchemy>=2.0.0             # Database ORM (optional but recommended)
-
-# GUI
-tkinter-tooltip>=2.1.0        # GUI tooltips
-# Note: tkinter comes with Python
-
-# Windows-specific optimizations (optional)
+# Windows-specific optimizations (auto-skipped on macOS/Linux)
 dxcam>=0.0.5; sys_platform == 'win32'  # Fast DirectX screen capture
 
 # Utilities
-pywin32>=306; sys_platform == 'win32'  # Windows API access
-python-dotenv>=1.0.0          # Environment variables
 pyyaml>=6.0                   # Configuration file support
 
-# Machine Learning Exports (optional - install what you need)
-torch>=2.0.0; extra == 'pytorch'  # PyTorch export
-torchvision>=0.15.0; extra == 'pytorch'  # PyTorch video utilities
-tensorflow>=2.13.0; extra == 'tensorflow'  # TensorFlow export
-h5py>=3.9.0; extra == 'hdf5'  # HDF5 export (universal format)
+# Note: tkinter comes with Python (no pip install needed)
 
-# Note: For H.264/H.265 video compression, install FFmpeg system-wide:
-#   Windows: choco install ffmpeg
-#   macOS: brew install ffmpeg
-#   Linux: sudo apt install ffmpeg
+# =============================================================================
+# IMPORTANT: FFmpeg Required for H.264/H.265 Compression
+# =============================================================================
+# Install FFmpeg system-wide (not via pip):
+#
+#   Windows:  choco install ffmpeg
+#             OR download from https://ffmpeg.org/download.html
+#
+#   macOS:    brew install ffmpeg
+#
+#   Linux:    sudo apt install ffmpeg
+#
+# Verify with: ffmpeg -version
+# =============================================================================
 
+# =============================================================================
+# OPTIONAL: Machine Learning Exports
+# =============================================================================
+# If you want to export recordings to PyTorch/TensorFlow/HDF5:
+#
+#   pip install -r requirements-ml.txt
+#
+# Or install individually:
+#   pip install torch torchvision     # PyTorch export
+#   pip install tensorflow            # TensorFlow export
+#   pip install h5py                  # HDF5 export (recommended)
+# =============================================================================

@@ -42,6 +42,9 @@ Examples:
   # Record with custom latency offset
   python main.py --game "CS:GO" --keyboard --latency 50
   
+  # Record with H.265 compression (smaller files)
+  python main.py --game "Valorant" --keyboard --codec h265 --quality 22
+  
   # Use GUI mode
   python main.py --gui
   
@@ -117,8 +120,8 @@ Examples:
     parser.add_argument(
         '--fps',
         type=int,
-        default=60,
-        help='Video frame rate (default: 60)'
+        default=None,
+        help='Video frame rate (default: from config or 60)'
     )
     parser.add_argument(
         '--monitor',
@@ -130,6 +133,19 @@ Examples:
         '--no-dxcam',
         action='store_true',
         help='Disable DXCam optimization on Windows'
+    )
+    parser.add_argument(
+        '--codec',
+        type=str,
+        choices=['h264', 'h265', 'mp4v', 'mjpeg', 'raw'],
+        default=None,
+        help='Video codec (default: from config or h264)'
+    )
+    parser.add_argument(
+        '--quality',
+        type=int,
+        default=None,
+        help='Video quality CRF 0-51 for H.264/H.265 (default: from config or 20, lower=better)'
     )
     
     # Advanced options
@@ -166,6 +182,8 @@ def run_cli(args: argparse.Namespace):
     
     # Load config
     config = load_config(args.config)
+    recording_config = config.get('recording', {})
+    audio_config = config.get('audio', {})
     
     # Determine input type
     if args.xbox:
@@ -175,15 +193,19 @@ def run_cli(args: argparse.Namespace):
     else:
         input_type = 'keyboard'
     
-    # Determine audio settings
+    # Determine audio settings (CLI flags override config)
     capture_system_audio = args.system_audio
     capture_microphone = args.microphone
     
-    # If neither specified, check config
+    # If neither specified on CLI, check config
     if not capture_system_audio and not capture_microphone:
-        audio_config = config.get('audio', {})
         capture_system_audio = audio_config.get('system_audio', False)
         capture_microphone = audio_config.get('microphone_audio', False)
+    
+    # Determine video settings (CLI flags override config)
+    fps = args.fps if args.fps is not None else recording_config.get('fps', 60)
+    codec = args.codec if args.codec is not None else recording_config.get('video_codec', 'h264')
+    quality = args.quality if args.quality is not None else recording_config.get('video_quality', 20)
     
     # Setup paths
     data_dir = args.data_dir
@@ -196,14 +218,16 @@ def run_cli(args: argparse.Namespace):
         sessions_base_path=sessions_path,
         game_name=args.game,
         input_type=input_type,
-        fps=args.fps,
+        fps=fps,
         sample_rate=args.sample_rate,
         latency_offset_ms=args.latency,
         capture_system_audio=capture_system_audio,
         capture_microphone=capture_microphone,
         capture_mouse=not args.no_mouse,
         monitor_index=args.monitor,
-        use_dxcam=not args.no_dxcam
+        use_dxcam=not args.no_dxcam,
+        codec=codec,
+        quality=quality
     )
     
     # Start recording
@@ -241,9 +265,12 @@ def show_stats(data_dir: str):
     print("📊 GameOn Database Statistics")
     print("="*60)
     print(f"Total Sessions:      {stats['total_sessions']}")
+    print(f"Completed Sessions:  {stats['completed_sessions']}")
     print(f"Unique Games:        {stats['unique_games']}")
     print(f"Total Duration:      {stats['total_duration_seconds'] / 3600:.2f} hours")
+    print(f"Total Frames:        {stats['total_frames']:,}")
     print(f"Total Input Events:  {stats['total_input_events']:,}")
+    print(f"Total Storage:       {stats['total_storage_gb']:.2f} GB")
     print("="*60 + "\n")
     
     # Show recent sessions
@@ -253,10 +280,14 @@ def show_stats(data_dir: str):
         print("-" * 60)
         for session in recent:
             duration = session.duration_seconds or 0
+            codec_info = session.video_codec or 'unknown'
+            size_mb = (session.file_size_bytes or 0) / (1024**2)
             print(f"  [{session.id}] {session.game_name}")
             print(f"      Start: {session.start_time}")
             print(f"      Duration: {duration // 60}m {duration % 60}s")
-            print(f"      Input: {session.input_type}")
+            print(f"      Input: {session.input_type}, Codec: {codec_info}")
+            if size_mb > 0:
+                print(f"      Size: {size_mb:.1f} MB")
             print()
 
 
@@ -290,4 +321,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
