@@ -1,6 +1,7 @@
 """
 Session manager for GameOn.
 Orchestrates video, audio, and input capture for recording sessions.
+Enhanced with video metadata tracking and health monitoring.
 """
 import os
 import time
@@ -114,7 +115,7 @@ class SessionManager:
         print(f"{'='*60}")
         print(f"Game: {self.game_name}")
         print(f"Input: {self.input_type}")
-        print(f"Video: {self.fps} FPS, Monitor {self.monitor_index}")
+        print(f"Video: {self.fps} FPS, {self.codec.upper()}, Monitor {self.monitor_index}")
         print(f"Audio: System={self.capture_system_audio}, Mic={self.capture_microphone}")
         print(f"Latency offset: {self.latency_offset_ms} ms")
         print(f"{'='*60}\n")
@@ -124,11 +125,32 @@ class SessionManager:
         print(f"📁 Session directory: {self.session_path}")
         
         # Define file paths
-        video_path = os.path.join(self.session_path, "video.avi")
+        # Determine video extension based on codec
+        if self.codec in ['h264', 'h265']:
+            video_ext = '.mp4'
+        else:
+            video_ext = '.avi'
+        
+        video_path = os.path.join(self.session_path, f"video{video_ext}")
         system_audio_path = os.path.join(self.session_path, "system_audio.wav") if self.capture_system_audio else None
         mic_audio_path = os.path.join(self.session_path, "microphone_audio.wav") if self.capture_microphone else None
         
-        # Create session in database
+        # Initialize video capture first to get monitor info
+        self.video_capture = VideoCapture(
+            fps=self.fps,
+            monitor_index=self.monitor_index,
+            output_path=video_path,
+            codec=self.codec,
+            quality=self.quality,
+            use_dxcam=self.use_dxcam
+        )
+        
+        # Get monitor info for metadata
+        monitor_info = self.video_capture.get_monitor_info()
+        video_width = monitor_info.get('width')
+        video_height = monitor_info.get('height')
+        
+        # Create session in database with video metadata
         self.current_session = Session(
             game_name=self.game_name,
             start_time=datetime.now(),
@@ -139,22 +161,15 @@ class SessionManager:
             video_path=video_path,
             system_audio_path=system_audio_path,
             microphone_audio_path=mic_audio_path,
-            status='recording'
+            status='recording',
+            video_width=video_width,
+            video_height=video_height,
+            video_codec=self.codec
         )
         
         self.session_id = self.db_manager.create_session(self.current_session)
         self.current_session.id = self.session_id
         print(f"✓ Session created in database (ID: {self.session_id})")
-        
-        # Initialize video capture
-        self.video_capture = VideoCapture(
-            fps=self.fps,
-            monitor_index=self.monitor_index,
-            output_path=video_path,
-            codec=self.codec,
-            quality=self.quality,
-            use_dxcam=self.use_dxcam
-        )
         
         # Initialize audio capture
         self.audio_capture = AudioCapture(
@@ -221,6 +236,24 @@ class SessionManager:
         if self.input_capture:
             input_events = self.input_capture.stop_recording()
         
+        # Update session with video metadata
+        if self.current_session and self.session_id:
+            # Get video file size
+            if self.current_session.video_path and os.path.exists(self.current_session.video_path):
+                self.current_session.file_size_bytes = os.path.getsize(self.current_session.video_path)
+            
+            # Calculate total frames (approximate)
+            duration_seconds = (datetime.now() - self.current_session.start_time).total_seconds()
+            self.current_session.total_frames = int(duration_seconds * self.fps)
+            
+            # Update timestamps
+            self.current_session.end_time = datetime.now()
+            self.current_session.duration_seconds = int(duration_seconds)
+            self.current_session.status = 'completed'
+            
+            self.db_manager.update_session(self.current_session)
+            print(f"✓ Session metadata updated")
+        
         # Save input events to database
         if input_events and self.session_id:
             print(f"💾 Saving {len(input_events)} input events to database...")
@@ -244,28 +277,26 @@ class SessionManager:
             for i in range(0, len(event_objects), batch_size):
                 batch = event_objects[i:i + batch_size]
                 self.db_manager.add_input_events_batch(batch)
+                print(f"  ✓ Saved batch {i//batch_size + 1}/{(len(event_objects)-1)//batch_size + 1}")
             
-            print(f"✓ Input events saved")
-        
-        # Update session in database
-        if self.current_session and self.session_id:
-            self.current_session.end_time = datetime.now()
-            duration = (self.current_session.end_time - self.current_session.start_time).total_seconds()
-            self.current_session.duration_seconds = int(duration)
-            self.current_session.status = 'completed'
-            
-            self.db_manager.update_session(self.current_session)
-            print(f"✓ Session updated (Duration: {duration:.1f} seconds)")
+            print(f"✓ Input events saved with action codes")
         
         # Print summary
-        print(f"\n{'='*60}")
-        print("✅ RECORDING COMPLETED")
-        print(f"{'='*60}")
-        print(f"Session ID: {self.session_id}")
-        print(f"Duration: {self.current_session.duration_seconds} seconds")
-        print(f"Location: {self.session_path}")
-        print(f"Input events: {len(input_events)}")
-        print(f"{'='*60}\n")
+        if self.current_session:
+            print(f"\n{'='*60}")
+            print("✅ RECORDING COMPLETED")
+            print(f"{'='*60}")
+            print(f"Session ID: {self.session_id}")
+            print(f"Duration: {self.current_session.duration_seconds} seconds")
+            print(f"Resolution: {self.current_session.video_width}x{self.current_session.video_height}")
+            print(f"Codec: {self.current_session.video_codec}")
+            print(f"Frames: {self.current_session.total_frames}")
+            if self.current_session.file_size_bytes:
+                size_mb = self.current_session.file_size_bytes / (1024**2)
+                print(f"File size: {size_mb:.1f} MB")
+            print(f"Location: {self.session_path}")
+            print(f"Input events: {len(input_events)}")
+            print(f"{'='*60}\n")
         
         self._cleanup()
     
@@ -300,4 +331,3 @@ class SessionManager:
         """Context manager exit."""
         if self.is_recording:
             self.stop_recording()
-

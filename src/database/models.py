@@ -1,5 +1,6 @@
 """
 Database models for GameOn recording sessions.
+Enhanced with action codes, frame timestamps, and session health.
 """
 import sqlite3
 from datetime import datetime
@@ -24,7 +25,12 @@ class DatabaseSchema:
         latency_offset_ms INTEGER DEFAULT 0,
         status TEXT DEFAULT 'recording',
         monitor_index INTEGER DEFAULT 0,
-        notes TEXT
+        notes TEXT,
+        video_width INTEGER,
+        video_height INTEGER,
+        video_codec TEXT,
+        total_frames INTEGER,
+        file_size_bytes INTEGER
     );
     """
     
@@ -34,6 +40,10 @@ class DatabaseSchema:
     
     CREATE_SESSIONS_TIME_INDEX = """
     CREATE INDEX IF NOT EXISTS idx_start_time ON sessions(start_time);
+    """
+    
+    CREATE_SESSIONS_STATUS_INDEX = """
+    CREATE INDEX IF NOT EXISTS idx_status ON sessions(status);
     """
     
     CREATE_INPUT_EVENTS_TABLE = """
@@ -47,12 +57,18 @@ class DatabaseSchema:
         value REAL,
         x_position REAL,
         y_position REAL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        action_code INTEGER,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (action_code) REFERENCES action_codes(id)
     );
     """
     
     CREATE_INPUT_EVENTS_INDEX = """
     CREATE INDEX IF NOT EXISTS idx_session_events ON input_events(session_id, timestamp_ms);
+    """
+    
+    CREATE_INPUT_EVENTS_TIMESTAMP_INDEX = """
+    CREATE INDEX IF NOT EXISTS idx_timestamp ON input_events(timestamp_ms);
     """
     
     CREATE_ACTION_CODES_TABLE = """
@@ -80,6 +96,10 @@ class DatabaseSchema:
     );
     """
     
+    CREATE_FRAME_TIMESTAMPS_INDEX = """
+    CREATE INDEX IF NOT EXISTS idx_frame_timing ON frame_timestamps(session_id, frame_number);
+    """
+    
     CREATE_SESSION_HEALTH_TABLE = """
     CREATE TABLE IF NOT EXISTS session_health (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,10 +121,13 @@ class DatabaseSchema:
             cls.CREATE_SESSIONS_TABLE,
             cls.CREATE_SESSIONS_GAME_INDEX,
             cls.CREATE_SESSIONS_TIME_INDEX,
+            cls.CREATE_SESSIONS_STATUS_INDEX,
             cls.CREATE_INPUT_EVENTS_TABLE,
             cls.CREATE_INPUT_EVENTS_INDEX,
+            cls.CREATE_INPUT_EVENTS_TIMESTAMP_INDEX,
             cls.CREATE_ACTION_CODES_TABLE,
             cls.CREATE_FRAME_TIMESTAMPS_TABLE,
+            cls.CREATE_FRAME_TIMESTAMPS_INDEX,
             cls.CREATE_SESSION_HEALTH_TABLE
         ]
 
@@ -170,27 +193,63 @@ class Session:
             'latency_offset_ms': self.latency_offset_ms,
             'monitor_index': self.monitor_index,
             'status': self.status,
-            'notes': self.notes
+            'notes': self.notes,
+            'video_width': self.video_width,
+            'video_height': self.video_height,
+            'video_codec': self.video_codec,
+            'total_frames': self.total_frames,
+            'file_size_bytes': self.file_size_bytes
         }
     
     @classmethod
     def from_db_row(cls, row: tuple) -> 'Session':
-        """Create Session from database row."""
+        """
+        Create Session from database row.
+        Handles both old (13 columns) and new (18 columns) schema.
+        """
+        # Base fields (always present)
+        session_id = row[0]
+        game_name = row[1]
+        start_time = datetime.fromisoformat(row[2]) if row[2] else None
+        end_time = datetime.fromisoformat(row[3]) if row[3] else None
+        duration_seconds = row[4]
+        video_path = row[5]
+        system_audio_path = row[6]
+        microphone_audio_path = row[7]
+        input_type = row[8]
+        fps = row[9]
+        latency_offset_ms = row[10]
+        status = row[11]
+        monitor_index = row[12]
+        notes = row[13] if len(row) > 13 else None
+        
+        # New fields (may not be present in old databases)
+        video_width = row[14] if len(row) > 14 else None
+        video_height = row[15] if len(row) > 15 else None
+        video_codec = row[16] if len(row) > 16 else None
+        total_frames = row[17] if len(row) > 17 else None
+        file_size_bytes = row[18] if len(row) > 18 else None
+        
         return cls(
-            session_id=row[0],
-            game_name=row[1],
-            start_time=datetime.fromisoformat(row[2]) if row[2] else None,
-            end_time=datetime.fromisoformat(row[3]) if row[3] else None,
-            duration_seconds=row[4],
-            video_path=row[5],
-            system_audio_path=row[6],
-            microphone_audio_path=row[7],
-            input_type=row[8],
-            fps=row[9],
-            latency_offset_ms=row[10],
-            status=row[11],
-            monitor_index=row[12],
-            notes=row[13]
+            session_id=session_id,
+            game_name=game_name,
+            start_time=start_time,
+            end_time=end_time,
+            duration_seconds=duration_seconds,
+            video_path=video_path,
+            system_audio_path=system_audio_path,
+            microphone_audio_path=microphone_audio_path,
+            input_type=input_type,
+            fps=fps,
+            latency_offset_ms=latency_offset_ms,
+            status=status,
+            monitor_index=monitor_index,
+            notes=notes,
+            video_width=video_width,
+            video_height=video_height,
+            video_codec=video_codec,
+            total_frames=total_frames,
+            file_size_bytes=file_size_bytes
         )
 
 
@@ -236,8 +295,17 @@ class InputEvent:
             'action_code': self.action_code
         }
     
-    def to_normalized_dict(self, screen_width: int, screen_height: int) -> Dict[str, Any]:
-        """Convert to normalized representation for ML training."""
+    def to_normalized_dict(self, screen_width: int = 1920, screen_height: int = 1080) -> Dict[str, Any]:
+        """
+        Convert to normalized representation for ML training.
+        
+        Args:
+            screen_width: Screen width for normalizing mouse positions
+            screen_height: Screen height for normalizing mouse positions
+            
+        Returns:
+            Dictionary with normalized values
+        """
         data = self.to_dict()
         
         # Normalize mouse positions to [0, 1]
@@ -248,13 +316,14 @@ class InputEvent:
         
         # Normalize controller analog values to [-1, 1]
         if self.input_device in ['xbox', 'playstation'] and self.value is not None:
+            # Assuming raw value is in range [0, 255] with 128 as center
             data['value_normalized'] = (self.value - 128) / 128.0
         
         return data
 
 
 class ActionCode:
-    """Represents an action code mapping."""
+    """Represents an action code mapping for ML training."""
     
     def __init__(
         self,
@@ -275,6 +344,7 @@ class ActionCode:
         self.created_at = created_at
     
     def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
         return {
             'id': self.id,
             'input_device': self.input_device,
@@ -287,7 +357,7 @@ class ActionCode:
 
 
 class FrameTimestamp:
-    """Represents a frame timing record."""
+    """Represents a frame timing record for A/V synchronization."""
     
     def __init__(
         self,
@@ -306,6 +376,7 @@ class FrameTimestamp:
         self.dropped = dropped
     
     def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
         return {
             'id': self.id,
             'session_id': self.session_id,
@@ -317,7 +388,7 @@ class FrameTimestamp:
 
 
 class SessionHealth:
-    """Represents a session health check."""
+    """Represents a session health check record."""
     
     def __init__(
         self,
@@ -340,6 +411,7 @@ class SessionHealth:
         self.frames_dropped = frames_dropped
     
     def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
         return {
             'id': self.id,
             'session_id': self.session_id,
@@ -350,4 +422,3 @@ class SessionHealth:
             'frames_captured': self.frames_captured,
             'frames_dropped': self.frames_dropped
         }
-
