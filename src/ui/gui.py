@@ -5,6 +5,9 @@ FIXED: Scrollable canvas widget interactivity issue
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import threading
+import queue
+import time
+import platform
 import sys
 import os
 from pathlib import Path
@@ -15,6 +18,7 @@ from ..database import DatabaseManager
 
 class ToolTip:
     """Create a tooltip for a given widget."""
+    _status_sink = None  # Optional[Callable[[Optional[str]], None]]
     
     def __init__(self, widget, text):
         self.widget = widget
@@ -22,9 +26,36 @@ class ToolTip:
         self.tooltip_window = None
         self.widget.bind("<Enter>", self.show_tooltip)
         self.widget.bind("<Leave>", self.hide_tooltip)
+
+    @classmethod
+    def set_status_sink(cls, sink):
+        """
+        Provide a sink to display brief, non-invasive help text.
+        When set, tooltips will not create popup windows.
+        """
+        cls._status_sink = sink
+
+    def _brief_text(self) -> str:
+        if not self.text:
+            return ""
+        first_line = self.text.strip().splitlines()[0].strip()
+        if len(first_line) > 90:
+            return first_line[:87] + "..."
+        return first_line
     
     def show_tooltip(self, event=None):
         """Display tooltip."""
+        if not self.text:
+            return
+
+        # Non-invasive mode: show short hint in status bar.
+        if ToolTip._status_sink is not None:
+            ToolTip._status_sink(self._brief_text())
+            return
+
+        # Otherwise: don't show popups (too invasive for this UI).
+        return
+
         if self.tooltip_window or not self.text:
             return
         
@@ -51,9 +82,61 @@ class ToolTip:
     
     def hide_tooltip(self, event=None):
         """Hide tooltip."""
+        if ToolTip._status_sink is not None:
+            ToolTip._status_sink(None)
+            return
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+
+
+class _LineBufferedStream:
+    """
+    File-like stream that forwards complete lines to a callback.
+    Used to safely pipe stdout/stderr into the GUI log.
+    """
+
+    def __init__(self, on_line):
+        self._on_line = on_line
+        self._buffer = ""
+
+    def write(self, data):
+        if not data:
+            return 0
+        # Tkinter-safe logging is handled by GameOnGUI via queueing.
+        self._buffer += str(data)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                self._on_line(line)
+        return len(str(data))
+
+    def flush(self):
+        # Nothing to flush; the GUI log is not buffered at the widget level.
+        return
+
+
+class GUIStyle:
+    """Central place for colors/fonts to keep UI code readable."""
+
+    HEADER_BG = "#2c3e50"
+    HEADER_FG = "white"
+    HEADER_SUB_FG = "#ecf0f1"
+
+    START_BG = "#27ae60"
+    STOP_BG = "#e74c3c"
+    STATS_BG = "#3498db"
+
+    LOG_BG = "#f8f9fa"
+
+    FONT_TITLE = ("Arial", 22, "bold")
+    FONT_SUBTITLE = ("Arial", 9)
+    FONT_SECTION = ("Arial", 11, "bold")
+    FONT_LABEL = ("Arial", 10)
+    FONT_LABEL_BOLD = ("Arial", 10, "bold")
+    FONT_BUTTON_BIG = ("Arial", 13, "bold")
+    FONT_BUTTON = ("Arial", 10)
+    FONT_LOG = ("Courier", 9)
 
 
 class GameOnGUI:
@@ -62,6 +145,7 @@ class GameOnGUI:
     def __init__(self, root):
         """Initialize GUI."""
         self.root = root
+        self.style = GUIStyle()
         self.root.title("GameOn - Gameplay Recorder")
         self.root.geometry("700x900")
         self.root.resizable(True, True)
@@ -69,9 +153,23 @@ class GameOnGUI:
         # Session state
         self.session_manager = None
         self.is_recording = False
+        self._state = "idle"  # idle | starting | recording | stopping
+        self._recording_started_at = None
+        self._recording_lock = threading.Lock()
+
+        # Thread-safe UI/event bridge
+        self._ui_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._drain_job = None
+
+        # Stdout/stderr redirection (so background prints show up in GUI)
+        self._orig_stdout = None
+        self._orig_stderr = None
+        self._stdout_stream = None
+        self._stderr_stream = None
         
         # Setup UI
         self._setup_ui()
+        self._start_queue_drain()
         
         # Load config
         self.data_dir = './data'
@@ -83,7 +181,7 @@ class GameOnGUI:
         frame = tk.Frame(parent)
         frame.pack(fill=tk.X, pady=3)
         
-        label = tk.Label(frame, text=label_text, font=("Arial", 10), width=20, anchor='w')
+        label = tk.Label(frame, text=label_text, font=self.style.FONT_LABEL, width=20, anchor='w')
         label.pack(side=tk.LEFT, padx=(0, 10))
         
         widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -94,29 +192,179 @@ class GameOnGUI:
             ToolTip(widget, tooltip_text)
         
         return frame
+
+    # ========================================
+    # Thread-safe UI helpers
+    # ========================================
+
+    def _queue_log(self, message: str):
+        self._ui_queue.put(("log", message))
+
+    def _queue_status(self, message: str):
+        self._ui_queue.put(("status", message))
+
+    def _queue_error(self, title: str, message: str):
+        self._ui_queue.put(("error", title, message))
+
+    def _append_log_to_widget(self, message: str):
+        """Must be called on the Tk main thread."""
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
+    def _start_queue_drain(self):
+        """Begin periodic draining of the UI queue on the main thread."""
+        if self._drain_job is None:
+            self._drain_job = self.root.after(50, self._drain_ui_queue)
+
+    def _drain_ui_queue(self):
+        self._drain_job = None
+        try:
+            while True:
+                item = self._ui_queue.get_nowait()
+                kind = item[0]
+                if kind == "log":
+                    self._append_log_to_widget(item[1])
+                elif kind == "status":
+                    if hasattr(self, "status_var"):
+                        self.status_var.set(item[1])
+                elif kind == "error":
+                    _, title, msg = item
+                    messagebox.showerror(title, msg)
+        except queue.Empty:
+            pass
+
+        # Update timer text if recording
+        if self.is_recording and self._recording_started_at and hasattr(self, "timer_var"):
+            elapsed = int(time.time() - self._recording_started_at)
+            mm, ss = divmod(elapsed, 60)
+            hh, mm = divmod(mm, 60)
+            if hh:
+                self.timer_var.set(f"{hh:d}:{mm:02d}:{ss:02d}")
+            else:
+                self.timer_var.set(f"{mm:02d}:{ss:02d}")
+
+        self._start_queue_drain()
+
+    def _install_stdio_redirect(self):
+        """Redirect stdout/stderr into the GUI log (best-effort)."""
+        if self._orig_stdout is not None:
+            return  # already installed
+
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+
+        self._stdout_stream = _LineBufferedStream(lambda line: self._queue_log(line))
+        self._stderr_stream = _LineBufferedStream(lambda line: self._queue_log(f"ERR: {line}"))
+
+        sys.stdout = self._stdout_stream
+        sys.stderr = self._stderr_stream
+
+    def _restore_stdio(self):
+        if self._orig_stdout is None:
+            return
+        sys.stdout = self._orig_stdout
+        sys.stderr = self._orig_stderr
+        self._orig_stdout = None
+        self._orig_stderr = None
+        self._stdout_stream = None
+        self._stderr_stream = None
+
+    def _set_controls_enabled(self, enabled: bool):
+        """Enable/disable configuration controls during recording."""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        # Some widgets are ttk and expect string states; tk widgets accept both.
+        for w in getattr(self, "_config_widgets", []):
+            try:
+                w.configure(state=state)
+            except Exception:
+                try:
+                    w.configure(state=("readonly" if enabled else "disabled"))
+                except Exception:
+                    pass
+
+    def _base_status_text(self) -> str:
+        if self._state == "recording":
+            return "Recording"
+        if self._state == "starting":
+            return "Starting…"
+        if self._state == "stopping":
+            return "Stopping…"
+        return "Idle"
+
+    def _set_status_from_tooltip(self, text):
+        """Show short hints in status bar; restore normal status on leave."""
+        if not hasattr(self, "status_var"):
+            return
+        if text:
+            self.status_var.set(text)
+        else:
+            self.status_var.set(self._base_status_text())
+
+    def _is_descendant(self, widget, ancestor) -> bool:
+        """Return True if widget is inside ancestor's widget tree."""
+        w = widget
+        while w is not None:
+            if w == ancestor:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _bind_scroll_events(self, canvas: tk.Canvas, scrollable_root: tk.Widget):
+        """
+        Bind mousewheel/trackpad scrolling in a cross-platform way.
+        Uses bind_all but only scrolls when the event originates within scrollable_root.
+        """
+        system = platform.system()
+
+        def _scroll_units(units: int):
+            if units:
+                canvas.yview_scroll(units, "units")
+
+        def on_mousewheel(event):
+            if not self._is_descendant(event.widget, scrollable_root):
+                return
+            # macOS trackpad uses small deltas; Windows uses 120 multiples.
+            if system == "Darwin":
+                _scroll_units(int(-event.delta))
+            else:
+                _scroll_units(int(-event.delta / 120))
+
+        def on_linux_scroll_up(event):
+            if self._is_descendant(event.widget, scrollable_root):
+                _scroll_units(-3)
+
+        def on_linux_scroll_down(event):
+            if self._is_descendant(event.widget, scrollable_root):
+                _scroll_units(3)
+
+        self.root.bind_all("<MouseWheel>", on_mousewheel, add=True)
+        self.root.bind_all("<Button-4>", on_linux_scroll_up, add=True)
+        self.root.bind_all("<Button-5>", on_linux_scroll_down, add=True)
     
     def _setup_ui(self):
         """Setup user interface."""
         # Title bar
-        title_frame = tk.Frame(self.root, bg='#2c3e50', height=70)
+        title_frame = tk.Frame(self.root, bg=self.style.HEADER_BG, height=70)
         title_frame.pack(fill=tk.X)
         title_frame.pack_propagate(False)
         
         title_label = tk.Label(
             title_frame,
             text="🎮 GameOn Recorder",
-            font=("Arial", 22, "bold"),
-            bg='#2c3e50',
-            fg='white'
+            font=self.style.FONT_TITLE,
+            bg=self.style.HEADER_BG,
+            fg=self.style.HEADER_FG
         )
         title_label.pack(pady=12)
         
         subtitle = tk.Label(
             title_frame,
             text="Capture gameplay video, audio & inputs for AI training",
-            font=("Arial", 9),
-            bg='#2c3e50',
-            fg='#ecf0f1'
+            font=self.style.FONT_SUBTITLE,
+            bg=self.style.HEADER_BG,
+            fg=self.style.HEADER_SUB_FG
         )
         subtitle.pack()
         
@@ -143,20 +391,6 @@ class GameOnGUI:
         canvas.bind("<Configure>", configure_canvas_width)
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # Enable mouse wheel scrolling
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        # Bind mousewheel to canvas, not globally (to avoid issues)
-        def bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-        
-        canvas.bind("<Enter>", bind_mousewheel)
-        canvas.bind("<Leave>", unbind_mousewheel)
-        
         # Pack scrollbar and canvas
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
@@ -166,10 +400,10 @@ class GameOnGUI:
         # ===== END FIXED SECTION =====
         
         # ===== GAME NAME =====
-        game_section = tk.LabelFrame(main_frame, text="📝 Game Information", font=("Arial", 11, "bold"), padx=15, pady=10)
+        game_section = tk.LabelFrame(main_frame, text="📝 Game Information", font=self.style.FONT_SECTION, padx=15, pady=10)
         game_section.pack(fill=tk.X, pady=(0, 10))
         
-        game_label = tk.Label(game_section, text="Game Name:", font=("Arial", 10, "bold"))
+        game_label = tk.Label(game_section, text="Game Name:", font=self.style.FONT_LABEL_BOLD)
         game_label.pack(anchor=tk.W, pady=(0, 5))
         
         self.game_entry = tk.Entry(game_section, font=("Arial", 11), width=50)
@@ -195,14 +429,14 @@ class GameOnGUI:
                 "💡 Tip: Use consistent names for the same game.")
         
         # ===== INPUT DEVICE =====
-        input_section = tk.LabelFrame(main_frame, text="🎮 Input Device", font=("Arial", 11, "bold"), padx=15, pady=10)
+        input_section = tk.LabelFrame(main_frame, text="🎮 Input Device", font=self.style.FONT_SECTION, padx=15, pady=10)
         input_section.pack(fill=tk.X, pady=(0, 10))
         
         self.input_type = tk.StringVar(value='keyboard')
         
         kb_radio = tk.Radiobutton(input_section, text="⌨️  Keyboard + Mouse", 
                                    variable=self.input_type, value='keyboard', 
-                                   font=("Arial", 10))
+                                   font=self.style.FONT_LABEL)
         kb_radio.pack(anchor=tk.W, pady=2)
         ToolTip(kb_radio,
                 "Capture keyboard keys and mouse clicks/movements.\n\n"
@@ -213,7 +447,7 @@ class GameOnGUI:
         
         xbox_radio = tk.Radiobutton(input_section, text="🎮 Xbox Controller", 
                                      variable=self.input_type, value='xbox', 
-                                     font=("Arial", 10))
+                                     font=self.style.FONT_LABEL)
         xbox_radio.pack(anchor=tk.W, pady=2)
         ToolTip(xbox_radio,
                 "Capture Xbox controller inputs (XInput).\n\n"
@@ -224,7 +458,7 @@ class GameOnGUI:
         
         ps_radio = tk.Radiobutton(input_section, text="🎮 PlayStation Controller", 
                                    variable=self.input_type, value='playstation', 
-                                   font=("Arial", 10))
+                                   font=self.style.FONT_LABEL)
         ps_radio.pack(anchor=tk.W, pady=2)
         ToolTip(ps_radio,
                 "Capture PlayStation controller inputs (DirectInput).\n\n"
@@ -245,14 +479,14 @@ class GameOnGUI:
                 "Disable only if game doesn't use mouse.")
         
         # ===== AUDIO CAPTURE =====
-        audio_section = tk.LabelFrame(main_frame, text="🔊 Audio Capture", font=("Arial", 11, "bold"), padx=15, pady=10)
+        audio_section = tk.LabelFrame(main_frame, text="🔊 Audio Capture", font=self.style.FONT_SECTION, padx=15, pady=10)
         audio_section.pack(fill=tk.X, pady=(0, 10))
         
         self.capture_system_audio = tk.BooleanVar(value=True)
-        sys_audio_check = tk.Checkbutton(audio_section, text="🎵 System Audio (game sounds)", 
-                                          variable=self.capture_system_audio, font=("Arial", 10))
-        sys_audio_check.pack(anchor=tk.W, pady=2)
-        ToolTip(sys_audio_check,
+        self.sys_audio_check = tk.Checkbutton(audio_section, text="🎵 System Audio (game sounds)", 
+                                              variable=self.capture_system_audio, font=self.style.FONT_LABEL)
+        self.sys_audio_check.pack(anchor=tk.W, pady=2)
+        ToolTip(self.sys_audio_check,
                 "Capture system audio output (game sounds, music, effects).\n\n"
                 "✅ Uses: WASAPI loopback (Windows)\n"
                 "📊 Format: WAV, 44.1kHz stereo, ~50MB/hour\n"
@@ -262,10 +496,10 @@ class GameOnGUI:
                 "💡 Tip: Captures everything your speakers would play.")
         
         self.capture_microphone = tk.BooleanVar(value=True)
-        mic_check = tk.Checkbutton(audio_section, text="🎤 Microphone (voice chat)", 
-                                    variable=self.capture_microphone, font=("Arial", 10))
-        mic_check.pack(anchor=tk.W, pady=2)
-        ToolTip(mic_check,
+        self.mic_check = tk.Checkbutton(audio_section, text="🎤 Microphone (voice chat)", 
+                                        variable=self.capture_microphone, font=self.style.FONT_LABEL)
+        self.mic_check.pack(anchor=tk.W, pady=2)
+        ToolTip(self.mic_check,
                 "Capture microphone input (your voice, team chat).\n\n"
                 "✅ Cross-platform (works everywhere)\n"
                 "📊 Format: WAV, 44.1kHz stereo, ~50MB/hour\n"
@@ -274,17 +508,17 @@ class GameOnGUI:
                 "💡 Tip: Stored separately from system audio for flexibility.")
         
         # ===== VIDEO SETTINGS =====
-        video_section = tk.LabelFrame(main_frame, text="📹 Video Settings", font=("Arial", 11, "bold"), padx=15, pady=10)
+        video_section = tk.LabelFrame(main_frame, text="📹 Video Settings", font=self.style.FONT_SECTION, padx=15, pady=10)
         video_section.pack(fill=tk.X, pady=(0, 10))
         
         # FPS
         fps_frame = tk.Frame(video_section)
         fps_frame.pack(fill=tk.X, pady=3)
-        fps_label = tk.Label(fps_frame, text="Frame Rate (FPS):", font=("Arial", 10), width=20, anchor='w')
+        fps_label = tk.Label(fps_frame, text="Frame Rate (FPS):", font=self.style.FONT_LABEL, width=20, anchor='w')
         fps_label.pack(side=tk.LEFT)
         self.fps_var = tk.IntVar(value=60)
         fps_spinbox = tk.Spinbox(fps_frame, from_=15, to=120, increment=15, 
-                                  textvariable=self.fps_var, width=10, font=("Arial", 10))
+                                  textvariable=self.fps_var, width=10, font=self.style.FONT_LABEL)
         fps_spinbox.pack(side=tk.LEFT)
         ToolTip(fps_label,
                 "Video capture frame rate (frames per second).\n\n"
@@ -305,12 +539,12 @@ class GameOnGUI:
         # Codec
         codec_frame = tk.Frame(video_section)
         codec_frame.pack(fill=tk.X, pady=3)
-        codec_label = tk.Label(codec_frame, text="Video Codec:", font=("Arial", 10), width=20, anchor='w')
+        codec_label = tk.Label(codec_frame, text="Video Codec:", font=self.style.FONT_LABEL, width=20, anchor='w')
         codec_label.pack(side=tk.LEFT)
         self.codec_var = tk.StringVar(value='h264')
         codec_combo = ttk.Combobox(codec_frame, textvariable=self.codec_var, 
                                     values=['h264', 'h265', 'mp4v', 'mjpeg', 'raw'],
-                                    state='readonly', width=15, font=("Arial", 10))
+                                    state='readonly', width=15, font=self.style.FONT_LABEL)
         codec_combo.pack(side=tk.LEFT)
         ToolTip(codec_label,
                 "Video compression codec.\n\n"
@@ -327,11 +561,11 @@ class GameOnGUI:
         # Quality
         quality_frame = tk.Frame(video_section)
         quality_frame.pack(fill=tk.X, pady=3)
-        quality_label = tk.Label(quality_frame, text="Video Quality (CRF):", font=("Arial", 10), width=20, anchor='w')
+        quality_label = tk.Label(quality_frame, text="Video Quality (CRF):", font=self.style.FONT_LABEL, width=20, anchor='w')
         quality_label.pack(side=tk.LEFT)
         self.quality_var = tk.IntVar(value=20)
         quality_spinbox = tk.Spinbox(quality_frame, from_=0, to=51, 
-                                      textvariable=self.quality_var, width=10, font=("Arial", 10))
+                                      textvariable=self.quality_var, width=10, font=self.style.FONT_LABEL)
         quality_spinbox.pack(side=tk.LEFT)
         quality_info = tk.Label(quality_frame, text="(lower = better)", font=("Arial", 9, "italic"), fg='gray')
         quality_info.pack(side=tk.LEFT, padx=(5, 0))
@@ -352,11 +586,11 @@ class GameOnGUI:
         # Monitor
         monitor_frame = tk.Frame(video_section)
         monitor_frame.pack(fill=tk.X, pady=3)
-        monitor_label = tk.Label(monitor_frame, text="Monitor:", font=("Arial", 10), width=20, anchor='w')
+        monitor_label = tk.Label(monitor_frame, text="Monitor:", font=self.style.FONT_LABEL, width=20, anchor='w')
         monitor_label.pack(side=tk.LEFT)
         self.monitor_var = tk.IntVar(value=0)
         monitor_spinbox = tk.Spinbox(monitor_frame, from_=0, to=5, 
-                                      textvariable=self.monitor_var, width=10, font=("Arial", 10))
+                                      textvariable=self.monitor_var, width=10, font=self.style.FONT_LABEL)
         monitor_spinbox.pack(side=tk.LEFT)
         ToolTip(monitor_label,
                 "Which monitor to capture.\n\n"
@@ -368,10 +602,10 @@ class GameOnGUI:
         
         # DXCam
         self.use_dxcam = tk.BooleanVar(value=True)
-        dxcam_check = tk.Checkbutton(video_section, text="Use DXCam (Windows DirectX optimization)", 
-                                      variable=self.use_dxcam, font=("Arial", 9, "italic"))
-        dxcam_check.pack(anchor=tk.W, pady=(8, 2))
-        ToolTip(dxcam_check,
+        self.dxcam_check = tk.Checkbutton(video_section, text="Use DXCam (Windows DirectX optimization)", 
+                                          variable=self.use_dxcam, font=("Arial", 9, "italic"))
+        self.dxcam_check.pack(anchor=tk.W, pady=(8, 2))
+        ToolTip(self.dxcam_check,
                 "Enable DirectX hardware-accelerated capture (Windows only).\n\n"
                 "✅ Advantages:\n"
                 "  • 3x faster capture than MSS\n"
@@ -379,17 +613,17 @@ class GameOnGUI:
                 "💡 Highly recommended for Windows!")
         
         # ===== ADVANCED SETTINGS =====
-        advanced_section = tk.LabelFrame(main_frame, text="⚙️  Advanced Settings", font=("Arial", 11, "bold"), padx=15, pady=10)
+        advanced_section = tk.LabelFrame(main_frame, text="⚙️  Advanced Settings", font=self.style.FONT_SECTION, padx=15, pady=10)
         advanced_section.pack(fill=tk.X, pady=(0, 10))
         
         # Latency
         latency_frame = tk.Frame(advanced_section)
         latency_frame.pack(fill=tk.X, pady=3)
-        latency_label = tk.Label(latency_frame, text="Latency Offset (ms):", font=("Arial", 10), width=20, anchor='w')
+        latency_label = tk.Label(latency_frame, text="Latency Offset (ms):", font=self.style.FONT_LABEL, width=20, anchor='w')
         latency_label.pack(side=tk.LEFT)
         self.latency_var = tk.IntVar(value=0)
         latency_spinbox = tk.Spinbox(latency_frame, from_=-500, to=500, increment=10,
-                                      textvariable=self.latency_var, width=10, font=("Arial", 10))
+                                      textvariable=self.latency_var, width=10, font=self.style.FONT_LABEL)
         latency_spinbox.pack(side=tk.LEFT)
         ToolTip(latency_label,
                 "Timing offset between video and inputs (milliseconds).\n\n"
@@ -404,12 +638,12 @@ class GameOnGUI:
         # Sample Rate
         sample_frame = tk.Frame(advanced_section)
         sample_frame.pack(fill=tk.X, pady=3)
-        sample_label = tk.Label(sample_frame, text="Audio Sample Rate:", font=("Arial", 10), width=20, anchor='w')
+        sample_label = tk.Label(sample_frame, text="Audio Sample Rate:", font=self.style.FONT_LABEL, width=20, anchor='w')
         sample_label.pack(side=tk.LEFT)
         self.sample_rate_var = tk.IntVar(value=44100)
         sample_combo = ttk.Combobox(sample_frame, textvariable=self.sample_rate_var,
                                      values=[22050, 44100, 48000, 96000],
-                                     state='readonly', width=15, font=("Arial", 10))
+                                     state='readonly', width=15, font=self.style.FONT_LABEL)
         sample_combo.pack(side=tk.LEFT)
         ToolTip(sample_label,
                 "Audio recording sample rate (Hz).\n\n"
@@ -419,7 +653,7 @@ class GameOnGUI:
                 "✅ 44100 Hz: CD quality (recommended)")
         
         # ===== STORAGE INFO =====
-        storage_section = tk.LabelFrame(main_frame, text="💾 Storage Estimate", font=("Arial", 11, "bold"), padx=15, pady=10)
+        storage_section = tk.LabelFrame(main_frame, text="💾 Storage Estimate", font=self.style.FONT_SECTION, padx=15, pady=10)
         storage_section.pack(fill=tk.X, pady=(0, 10))
         
         self.storage_label = tk.Label(storage_section, text="", font=("Arial", 9), justify=tk.LEFT)
@@ -438,8 +672,8 @@ class GameOnGUI:
         self.start_button = tk.Button(
             button_frame,
             text="▶ START RECORDING",
-            font=("Arial", 13, "bold"),
-            bg='#27ae60',
+            font=self.style.FONT_BUTTON_BIG,
+            bg=self.style.START_BG,
             fg='white',
             command=self.start_recording,
             height=2,
@@ -450,8 +684,8 @@ class GameOnGUI:
         self.stop_button = tk.Button(
             button_frame,
             text="⏹ STOP RECORDING",
-            font=("Arial", 13, "bold"),
-            bg='#e74c3c',
+            font=self.style.FONT_BUTTON_BIG,
+            bg=self.style.STOP_BG,
             fg='white',
             command=self.stop_recording,
             state=tk.DISABLED,
@@ -464,20 +698,47 @@ class GameOnGUI:
         stats_btn = tk.Button(
             button_frame,
             text="📊 View Statistics",
-            font=("Arial", 10),
+            font=self.style.FONT_BUTTON,
             command=self._show_stats,
-            bg='#3498db',
+            bg=self.style.STATS_BG,
             fg='white',
             cursor='hand2'
         )
         stats_btn.pack(fill=tk.X)
+
+        # Status + progress + timer (visible feedback)
+        status_frame = tk.Frame(main_frame)
+        status_frame.pack(fill=tk.X, pady=(5, 10))
+
+        self.status_var = tk.StringVar(value="Idle")
+        status_label = tk.Label(status_frame, textvariable=self.status_var, font=self.style.FONT_LABEL_BOLD, anchor="w")
+        status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.timer_var = tk.StringVar(value="00:00")
+        timer_label = tk.Label(status_frame, textvariable=self.timer_var, font=self.style.FONT_LABEL, width=8, anchor="e")
+        timer_label.pack(side=tk.RIGHT)
+
+        self.progress = ttk.Progressbar(main_frame, mode="indeterminate")
+        self.progress.pack(fill=tk.X, pady=(0, 10))
+        self.progress.stop()
+
+        # Make tooltips non-invasive (no popups): show short hint in status bar
+        ToolTip.set_status_sink(self._set_status_from_tooltip)
+
+        # Make scrolling work with trackpad/mouse wheel on macOS/Windows/Linux
+        self._bind_scroll_events(canvas=canvas, scrollable_root=scrollable_frame)
         
         # ===== STATUS LOG =====
-        log_frame = tk.LabelFrame(main_frame, text="📜 Status Log", font=("Arial", 10, "bold"), padx=5, pady=5)
+        log_frame = tk.LabelFrame(main_frame, text="📜 Status Log", font=self.style.FONT_LABEL_BOLD, padx=5, pady=5)
         log_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Courier", 9), 
-                                                   state=tk.DISABLED, bg='#f8f9fa')
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            height=10,
+            font=self.style.FONT_LOG,
+            state=tk.DISABLED,
+            bg=self.style.LOG_BG
+        )
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
         # Initial messages
@@ -485,6 +746,25 @@ class GameOnGUI:
         self.log("💡 Hover over any setting to see detailed explanations")
         self.log("📝 Configure your settings above and click START RECORDING")
         self.log("")
+
+        # Track controls that should be disabled while recording
+        self._config_widgets = [
+            self.game_entry,
+            kb_radio, xbox_radio, ps_radio,
+            mouse_check,
+            getattr(self, "sys_audio_check", None),
+            getattr(self, "mic_check", None),
+            fps_spinbox, codec_combo, quality_spinbox, monitor_spinbox,
+            getattr(self, "dxcam_check", None),
+            latency_spinbox, sample_combo,
+            calc_btn,
+        ]
+        self._config_widgets = [w for w in self._config_widgets if w is not None]
+
+        # Platform hints (so users see why something might not work)
+        sys_name = platform.system()
+        if sys_name != "Windows":
+            self.log(f"ℹ️ Platform detected: {sys_name}. Some capture options are Windows-only (DXCam, system audio loopback, gamepads).")
         
         # Update storage estimate
         self._update_storage_estimate()
@@ -545,10 +825,8 @@ class GameOnGUI:
     
     def log(self, message: str):
         """Add message to log."""
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
+        # Thread-safe: can be called from worker threads.
+        self._queue_log(message)
     
     def start_recording(self):
         """Start recording session."""
@@ -558,10 +836,17 @@ class GameOnGUI:
             messagebox.showerror("Error", "Please enter a game name")
             return
         
-        # Disable start button
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        self.is_recording = True
+        with self._recording_lock:
+            if self._state != "idle":
+                self.log(f"⚠ Cannot start right now (state: {self._state})")
+                return
+            self._state = "starting"
+            # optimistic UI state
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+            self._set_controls_enabled(False)
+            self.progress.start(10)
+            self._queue_status("Starting…")
         
         self.log("\n" + "="*60)
         self.log("🎬 Starting recording session...")
@@ -569,6 +854,9 @@ class GameOnGUI:
         
         # Create session manager with ALL parameters passed in constructor
         try:
+            # Make sure ./data exists when launched from unusual working dirs
+            os.makedirs(self.data_dir, exist_ok=True)
+
             self.session_manager = SessionManager(
                 db_path=self.db_path,
                 sessions_base_path=self.sessions_path,
@@ -589,16 +877,34 @@ class GameOnGUI:
             # Start in separate thread
             def start_thread():
                 try:
+                    self._install_stdio_redirect()
                     success = self.session_manager.start_recording()
                     if success:
-                        self.log("✅ Recording started successfully!")
-                        self.log("💡 Press STOP RECORDING when done")
+                        self.is_recording = True
+                        with self._recording_lock:
+                            self._state = "recording"
+                        self._recording_started_at = time.time()
+                        self._queue_status("Recording")
+                        self._queue_log("✅ Recording started successfully!")
+                        self._queue_log("💡 Press STOP RECORDING when done")
+                        self.root.after(0, lambda: self.progress.stop())
                     else:
-                        self.log("❌ Failed to start recording")
+                        self._queue_log("❌ Failed to start recording (see log for details).")
+                        self._queue_status("Idle")
+                        with self._recording_lock:
+                            self._state = "idle"
                         self.root.after(0, self._reset_buttons)
+                        self.root.after(0, lambda: self.progress.stop())
+                        self._restore_stdio()
                 except Exception as e:
-                    self.log(f"❌ Error: {str(e)}")
+                    self._queue_log(f"❌ Error while starting: {str(e)}")
+                    self._queue_status("Idle")
+                    self._queue_error("Error", f"Failed to start recording:\n\n{str(e)}")
+                    with self._recording_lock:
+                        self._state = "idle"
                     self.root.after(0, self._reset_buttons)
+                    self.root.after(0, lambda: self.progress.stop())
+                    self._restore_stdio()
             
             thread = threading.Thread(target=start_thread, daemon=True)
             thread.start()
@@ -606,12 +912,23 @@ class GameOnGUI:
         except Exception as e:
             self.log(f"❌ Error: {str(e)}")
             messagebox.showerror("Error", f"Failed to start recording: {str(e)}")
+            with self._recording_lock:
+                self._state = "idle"
             self._reset_buttons()
+            self.progress.stop()
+            self._restore_stdio()
     
     def stop_recording(self):
         """Stop recording session."""
-        if not self.session_manager or not self.is_recording:
-            return
+        with self._recording_lock:
+            if self._state == "starting":
+                self.log("⏳ Still starting up. Please wait a moment, then press STOP again.")
+                return
+            if self._state != "recording" or not self.session_manager or not self.is_recording:
+                return
+            self._state = "stopping"
+            self._queue_status("Stopping…")
+            self.progress.start(10)
         
         self.log("\n" + "="*60)
         self.log("⏹ Stopping recording...")
@@ -621,30 +938,45 @@ class GameOnGUI:
         def stop_thread():
             try:
                 self.session_manager.stop_recording()
-                self.log("✅ Recording stopped and saved!")
-                self.log("💾 Check 'View Statistics' to see your session")
+                self._queue_log("✅ Recording stopped and saved!")
+                self._queue_log("💾 Check 'View Statistics' to see your session")
+                self._queue_status("Idle")
+                with self._recording_lock:
+                    self._state = "idle"
+                self.is_recording = False
+                self._recording_started_at = None
                 self.root.after(0, self._reset_buttons)
+                self.root.after(0, lambda: self.progress.stop())
+                self._restore_stdio()
             except Exception as e:
-                self.log(f"❌ Error stopping: {str(e)}")
+                self._queue_log(f"❌ Error stopping: {str(e)}")
+                self._queue_status("Idle")
+                self._queue_error("Error", f"Failed to stop recording:\n\n{str(e)}")
+                with self._recording_lock:
+                    self._state = "idle"
+                self.is_recording = False
                 self.root.after(0, self._reset_buttons)
+                self.root.after(0, lambda: self.progress.stop())
+                self._restore_stdio()
         
         thread = threading.Thread(target=stop_thread, daemon=True)
         thread.start()
-        
-        self.is_recording = False
     
     def _reset_buttons(self):
         """Reset button states."""
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
+        self._set_controls_enabled(True)
+        self.timer_var.set("00:00")
     
     def on_closing(self):
         """Handle window closing."""
-        if self.is_recording:
+        if self.is_recording or self._state in ("starting", "stopping"):
             if messagebox.askokcancel("Quit", "Recording in progress. Stop recording and quit?"):
                 self.stop_recording()
                 self.root.after(1000, self.root.destroy)
         else:
+            self._restore_stdio()
             self.root.destroy()
 
 
