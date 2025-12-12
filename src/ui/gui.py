@@ -1,5 +1,6 @@
 """
 Enhanced GUI for GameOn recording control with comprehensive tooltips.
+FIXED: Scrollable canvas widget interactivity issue
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
@@ -119,21 +120,50 @@ class GameOnGUI:
         )
         subtitle.pack()
         
-        # Main scrollable container
-        canvas = tk.Canvas(self.root)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        # ===== FIXED: Main scrollable container =====
+        container = tk.Frame(self.root)
+        container.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas)
         
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        # Create window and store the window ID
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        # Configure scrolling
+        def configure_scroll(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        def configure_canvas_width(event):
+            # Update the width of the scrollable frame to match canvas width
+            canvas.itemconfig(canvas_window, width=event.width)
+        
+        scrollable_frame.bind("<Configure>", configure_scroll)
+        canvas.bind("<Configure>", configure_canvas_width)
         canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Enable mouse wheel scrolling
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind mousewheel to canvas, not globally (to avoid issues)
+        def bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        def unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+        
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+        
+        # Pack scrollbar and canvas
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
         
         main_frame = tk.Frame(scrollable_frame, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
+        # ===== END FIXED SECTION =====
         
         # ===== GAME NAME =====
         game_section = tk.LabelFrame(main_frame, text="📝 Game Information", font=("Arial", 11, "bold"), padx=15, pady=10)
@@ -145,6 +175,18 @@ class GameOnGUI:
         self.game_entry = tk.Entry(game_section, font=("Arial", 11), width=50)
         self.game_entry.pack(fill=tk.X, pady=(0, 5))
         self.game_entry.insert(0, "Enter game name...")
+        
+        # Clear placeholder on focus
+        def clear_placeholder(event):
+            if self.game_entry.get() == "Enter game name...":
+                self.game_entry.delete(0, tk.END)
+        
+        def restore_placeholder(event):
+            if not self.game_entry.get():
+                self.game_entry.insert(0, "Enter game name...")
+        
+        self.game_entry.bind("<FocusIn>", clear_placeholder)
+        self.game_entry.bind("<FocusOut>", restore_placeholder)
         
         ToolTip(self.game_entry, 
                 "The name of the game you're recording.\n\n"
@@ -258,12 +300,7 @@ class GameOnGUI:
                 "Video capture frame rate (frames per second).\n\n"
                 "⚡ 30 FPS: Lower CPU, smaller files (~250MB/hour)\n"
                 "✅ 60 FPS: Recommended, smooth motion (~500MB/hour)\n"
-                "🚀 120 FPS: High-speed games, larger files (~1GB/hour)\n\n"
-                "💡 Choose based on:\n"
-                "  • Game speed (fast = higher FPS)\n"
-                "  • Storage space available\n"
-                "  • CPU performance\n\n"
-                "Note: Files sizes with H.264 compression.")
+                "🚀 120 FPS: High-speed games, larger files (~1GB/hour)")
         
         # Codec
         codec_frame = tk.Frame(video_section)
@@ -278,29 +315,14 @@ class GameOnGUI:
         ToolTip(codec_label,
                 "Video compression codec.\n\n"
                 "✅ H.264 (Recommended): 20x compression, excellent quality\n"
-                "   • File size: ~500MB/hour @ 1080p 60fps\n"
-                "   • Quality: 99% (CRF 20)\n"
-                "   • AI Training: Perfect ✅\n\n"
                 "🚀 H.265: 40x compression, slower encoding\n"
-                "   • File size: ~250MB/hour\n"
-                "   • Encoding: 2x slower than H.264\n\n"
                 "⚠️  MP4V: Basic codec, larger files\n"
-                "⚠️  MJPEG: Motion JPEG, ~2GB/hour\n"
                 "❌ Raw: Uncompressed, ~10GB/hour (testing only)\n\n"
                 "💡 Requires FFmpeg installed (brew/choco install ffmpeg)")
         ToolTip(codec_combo,
                 "Video compression codec.\n\n"
                 "✅ H.264 (Recommended): 20x compression, excellent quality\n"
-                "   • File size: ~500MB/hour @ 1080p 60fps\n"
-                "   • Quality: 99% (CRF 20)\n"
-                "   • AI Training: Perfect ✅\n\n"
-                "🚀 H.265: 40x compression, slower encoding\n"
-                "   • File size: ~250MB/hour\n"
-                "   • Encoding: 2x slower than H.264\n\n"
-                "⚠️  MP4V: Basic codec, larger files\n"
-                "⚠️  MJPEG: Motion JPEG, ~2GB/hour\n"
-                "❌ Raw: Uncompressed, ~10GB/hour (testing only)\n\n"
-                "💡 Requires FFmpeg installed (brew/choco install ffmpeg)")
+                "🚀 H.265: 40x compression, slower encoding")
         
         # Quality
         quality_frame = tk.Frame(video_section)
@@ -320,25 +342,12 @@ class GameOnGUI:
                 "  18 = Nearly lossless (best for AI)\n"
                 "  ✅ 20 = Excellent (recommended)\n"
                 "  23 = High quality\n"
-                "  28 = Good quality\n"
                 "  51 = Worst quality\n\n"
-                "💡 For AI training: 18-23 is perfect\n"
-                "🎯 Lower CRF = Better quality, larger files\n"
-                "🎯 Higher CRF = Lower quality, smaller files\n\n"
-                "Note: Only affects H.264/H.265 codecs.")
+                "💡 For AI training: 18-23 is perfect")
         ToolTip(quality_spinbox,
                 "Constant Rate Factor (CRF) for H.264/H.265.\n\n"
-                "Quality Scale:\n"
-                "  0 = Lossless (huge files)\n"
-                "  18 = Nearly lossless (best for AI)\n"
-                "  ✅ 20 = Excellent (recommended)\n"
-                "  23 = High quality\n"
-                "  28 = Good quality\n"
-                "  51 = Worst quality\n\n"
-                "💡 For AI training: 18-23 is perfect\n"
-                "🎯 Lower CRF = Better quality, larger files\n"
-                "🎯 Higher CRF = Lower quality, smaller files\n\n"
-                "Note: Only affects H.264/H.265 codecs.")
+                "✅ 20 = Excellent (recommended)\n"
+                "Lower = Better quality, larger files")
         
         # Monitor
         monitor_frame = tk.Frame(video_section)
@@ -352,21 +361,10 @@ class GameOnGUI:
         ToolTip(monitor_label,
                 "Which monitor to capture.\n\n"
                 "✅ 0 = Primary monitor (recommended)\n"
-                "  1, 2, 3... = Secondary monitors\n\n"
-                "💡 Tip: Run the game on the monitor you select\n\n"
-                "🖥️  Multi-monitor setup:\n"
-                "  • Identify which monitor has the game\n"
-                "  • 0 is usually your main display\n"
-                "  • Test with a short recording first")
+                "  1, 2, 3... = Secondary monitors")
         ToolTip(monitor_spinbox,
                 "Which monitor to capture.\n\n"
-                "✅ 0 = Primary monitor (recommended)\n"
-                "  1, 2, 3... = Secondary monitors\n\n"
-                "💡 Tip: Run the game on the monitor you select\n\n"
-                "🖥️  Multi-monitor setup:\n"
-                "  • Identify which monitor has the game\n"
-                "  • 0 is usually your main display\n"
-                "  • Test with a short recording first")
+                "✅ 0 = Primary monitor (recommended)")
         
         # DXCam
         self.use_dxcam = tk.BooleanVar(value=True)
@@ -377,14 +375,8 @@ class GameOnGUI:
                 "Enable DirectX hardware-accelerated capture (Windows only).\n\n"
                 "✅ Advantages:\n"
                 "  • 3x faster capture than MSS\n"
-                "  • Lower CPU usage (~5% vs 15%)\n"
-                "  • Better for 60+ FPS recording\n"
-                "  • Direct GPU memory access\n\n"
-                "📦 Requirements:\n"
-                "  • Windows OS\n"
-                "  • DXCam installed: pip install dxcam\n\n"
-                "💡 Highly recommended for Windows!\n"
-                "⚠️  Falls back to MSS if unavailable.")
+                "  • Lower CPU usage (~5% vs 15%)\n\n"
+                "💡 Highly recommended for Windows!")
         
         # ===== ADVANCED SETTINGS =====
         advanced_section = tk.LabelFrame(main_frame, text="⚙️  Advanced Settings", font=("Arial", 11, "bold"), padx=15, pady=10)
@@ -401,28 +393,13 @@ class GameOnGUI:
         latency_spinbox.pack(side=tk.LEFT)
         ToolTip(latency_label,
                 "Timing offset between video and inputs (milliseconds).\n\n"
-                "🎯 Purpose: Sync inputs with video frames\n\n"
                 "When to adjust:\n"
-                "  • Inputs appear BEFORE they should → Use positive (e.g., +50ms)\n"
-                "  • Inputs appear AFTER they should → Use negative (e.g., -50ms)\n\n"
-                "💡 How to find correct offset:\n"
-                "  1. Record a short test session (0ms)\n"
-                "  2. Watch video and check input timing\n"
-                "  3. Adjust offset and test again\n\n"
-                "✅ Default (0ms) works for most systems\n"
-                "⚠️  High latency systems may need +30 to +100ms")
+                "  • Inputs appear BEFORE they should → Use positive (+50ms)\n"
+                "  • Inputs appear AFTER they should → Use negative (-50ms)\n\n"
+                "✅ Default (0ms) works for most systems")
         ToolTip(latency_spinbox,
                 "Timing offset between video and inputs (milliseconds).\n\n"
-                "🎯 Purpose: Sync inputs with video frames\n\n"
-                "When to adjust:\n"
-                "  • Inputs appear BEFORE they should → Use positive (e.g., +50ms)\n"
-                "  • Inputs appear AFTER they should → Use negative (e.g., -50ms)\n\n"
-                "💡 How to find correct offset:\n"
-                "  1. Record a short test session (0ms)\n"
-                "  2. Watch video and check input timing\n"
-                "  3. Adjust offset and test again\n\n"
-                "✅ Default (0ms) works for most systems\n"
-                "⚠️  High latency systems may need +30 to +100ms")
+                "✅ Default (0ms) works for most systems")
         
         # Sample Rate
         sample_frame = tk.Frame(advanced_section)
@@ -436,28 +413,10 @@ class GameOnGUI:
         sample_combo.pack(side=tk.LEFT)
         ToolTip(sample_label,
                 "Audio recording sample rate (Hz).\n\n"
-                "✅ 44100 Hz: CD quality (recommended)\n"
-                "   • Standard for most games\n"
-                "   • ~50MB/hour per track\n\n"
-                "🎵 48000 Hz: Professional quality\n"
-                "   • Slightly higher quality\n"
-                "   • ~55MB/hour per track\n\n"
-                "⚡ 22050 Hz: Lower quality, smaller files\n"
-                "   • Acceptable for voice\n"
-                "   • ~25MB/hour per track\n\n"
-                "💡 44100 Hz is perfect for AI training")
+                "✅ 44100 Hz: CD quality (recommended)")
         ToolTip(sample_combo,
                 "Audio recording sample rate (Hz).\n\n"
-                "✅ 44100 Hz: CD quality (recommended)\n"
-                "   • Standard for most games\n"
-                "   • ~50MB/hour per track\n\n"
-                "🎵 48000 Hz: Professional quality\n"
-                "   • Slightly higher quality\n"
-                "   • ~55MB/hour per track\n\n"
-                "⚡ 22050 Hz: Lower quality, smaller files\n"
-                "   • Acceptable for voice\n"
-                "   • ~25MB/hour per track\n\n"
-                "💡 44100 Hz is perfect for AI training")
+                "✅ 44100 Hz: CD quality (recommended)")
         
         # ===== STORAGE INFO =====
         storage_section = tk.LabelFrame(main_frame, text="💾 Storage Estimate", font=("Arial", 11, "bold"), padx=15, pady=10)
@@ -520,10 +479,6 @@ class GameOnGUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Courier", 9), 
                                                    state=tk.DISABLED, bg='#f8f9fa')
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        
-        # Pack canvas and scrollbar
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
         
         # Initial messages
         self.log("✨ Welcome to GameOn - Gameplay Recorder for AI Training!")
