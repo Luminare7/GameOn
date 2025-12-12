@@ -310,11 +310,11 @@ def main():
         from .gui import run_gui
         return run_gui()
     
-    # CLI recording mode - require game name
+    # If no game specified, launch GUI by default
+    # This allows double-clicking the app on macOS to open the GUI
     if not args.game:
-        print("❌ Error: --game is required for recording")
-        print("Use --help for usage information")
-        return 1
+        from .gui import run_gui
+        return run_gui()
     
     return run_cli(args)
 
