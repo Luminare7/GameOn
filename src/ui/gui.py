@@ -18,6 +18,7 @@ from ..database import DatabaseManager
 
 class ToolTip:
     """Create a tooltip for a given widget."""
+    _status_sink = None  # Optional[Callable[[Optional[str]], None]]
     
     def __init__(self, widget, text):
         self.widget = widget
@@ -25,9 +26,36 @@ class ToolTip:
         self.tooltip_window = None
         self.widget.bind("<Enter>", self.show_tooltip)
         self.widget.bind("<Leave>", self.hide_tooltip)
+
+    @classmethod
+    def set_status_sink(cls, sink):
+        """
+        Provide a sink to display brief, non-invasive help text.
+        When set, tooltips will not create popup windows.
+        """
+        cls._status_sink = sink
+
+    def _brief_text(self) -> str:
+        if not self.text:
+            return ""
+        first_line = self.text.strip().splitlines()[0].strip()
+        if len(first_line) > 90:
+            return first_line[:87] + "..."
+        return first_line
     
     def show_tooltip(self, event=None):
         """Display tooltip."""
+        if not self.text:
+            return
+
+        # Non-invasive mode: show short hint in status bar.
+        if ToolTip._status_sink is not None:
+            ToolTip._status_sink(self._brief_text())
+            return
+
+        # Otherwise: don't show popups (too invasive for this UI).
+        return
+
         if self.tooltip_window or not self.text:
             return
         
@@ -54,6 +82,9 @@ class ToolTip:
     
     def hide_tooltip(self, event=None):
         """Hide tooltip."""
+        if ToolTip._status_sink is not None:
+            ToolTip._status_sink(None)
+            return
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
@@ -252,6 +283,65 @@ class GameOnGUI:
                     w.configure(state=("readonly" if enabled else "disabled"))
                 except Exception:
                     pass
+
+    def _base_status_text(self) -> str:
+        if self._state == "recording":
+            return "Recording"
+        if self._state == "starting":
+            return "Starting…"
+        if self._state == "stopping":
+            return "Stopping…"
+        return "Idle"
+
+    def _set_status_from_tooltip(self, text):
+        """Show short hints in status bar; restore normal status on leave."""
+        if not hasattr(self, "status_var"):
+            return
+        if text:
+            self.status_var.set(text)
+        else:
+            self.status_var.set(self._base_status_text())
+
+    def _is_descendant(self, widget, ancestor) -> bool:
+        """Return True if widget is inside ancestor's widget tree."""
+        w = widget
+        while w is not None:
+            if w == ancestor:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _bind_scroll_events(self, canvas: tk.Canvas, scrollable_root: tk.Widget):
+        """
+        Bind mousewheel/trackpad scrolling in a cross-platform way.
+        Uses bind_all but only scrolls when the event originates within scrollable_root.
+        """
+        system = platform.system()
+
+        def _scroll_units(units: int):
+            if units:
+                canvas.yview_scroll(units, "units")
+
+        def on_mousewheel(event):
+            if not self._is_descendant(event.widget, scrollable_root):
+                return
+            # macOS trackpad uses small deltas; Windows uses 120 multiples.
+            if system == "Darwin":
+                _scroll_units(int(-event.delta))
+            else:
+                _scroll_units(int(-event.delta / 120))
+
+        def on_linux_scroll_up(event):
+            if self._is_descendant(event.widget, scrollable_root):
+                _scroll_units(-3)
+
+        def on_linux_scroll_down(event):
+            if self._is_descendant(event.widget, scrollable_root):
+                _scroll_units(3)
+
+        self.root.bind_all("<MouseWheel>", on_mousewheel, add=True)
+        self.root.bind_all("<Button-4>", on_linux_scroll_up, add=True)
+        self.root.bind_all("<Button-5>", on_linux_scroll_down, add=True)
     
     def _setup_ui(self):
         """Setup user interface."""
@@ -300,20 +390,6 @@ class GameOnGUI:
         scrollable_frame.bind("<Configure>", configure_scroll)
         canvas.bind("<Configure>", configure_canvas_width)
         canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Enable mouse wheel scrolling
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        # Bind mousewheel to canvas, not globally (to avoid issues)
-        def bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-        
-        canvas.bind("<Enter>", bind_mousewheel)
-        canvas.bind("<Leave>", unbind_mousewheel)
         
         # Pack scrollbar and canvas
         scrollbar.pack(side="right", fill="y")
@@ -645,6 +721,12 @@ class GameOnGUI:
         self.progress = ttk.Progressbar(main_frame, mode="indeterminate")
         self.progress.pack(fill=tk.X, pady=(0, 10))
         self.progress.stop()
+
+        # Make tooltips non-invasive (no popups): show short hint in status bar
+        ToolTip.set_status_sink(self._set_status_from_tooltip)
+
+        # Make scrolling work with trackpad/mouse wheel on macOS/Windows/Linux
+        self._bind_scroll_events(canvas=canvas, scrollable_root=scrollable_frame)
         
         # ===== STATUS LOG =====
         log_frame = tk.LabelFrame(main_frame, text="📜 Status Log", font=self.style.FONT_LABEL_BOLD, padx=5, pady=5)
