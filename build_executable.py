@@ -23,7 +23,7 @@ from pathlib import Path
 # Configuration
 # ============================================================================
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 APP_NAME = "GameOn"
 DESCRIPTION = "Gameplay Recorder for AI Training"
 

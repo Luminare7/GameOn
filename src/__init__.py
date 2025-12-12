@@ -2,7 +2,7 @@
 GameOn - Gameplay Recording for AI Training
 """
 
-__version__ = '1.0.2'
+__version__ = '1.0.3'
 __author__ = 'GameOn Contributors'
 
 from .capture import VideoCapture, AudioCapture, InputCapture
